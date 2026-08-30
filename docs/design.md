@@ -14,16 +14,16 @@ Webmail、日历、通讯录、邮件列表、多租户管理或与现有 MTA �
 ```text
 Internet MTA --SMTP/25--> picomaild --> append-only archive --> git / notmuch
 
-本地写信工具 --> durable outbox --> DKIM signer --> SMTP/MX --> Gmail 等收件方
+MUA --> 独立 outbound MTA 或 SMTP relay --> Gmail 等收件方
 ```
 
 “不用 POP3/IMAP”只适用于用户设备与邮件库之间的同步。公网邮件服务器之间收发邮件
 仍然必须使用 SMTP。Git 同步的是关闭连接后已经原子落盘的文件，不同步临时文件，也
 不承载投递协议。
 
-入站与出站可以在同一个小二进制中共享配置和存储代码，但应使用不同监听面和不同
-systemd 权限。入站服务只监听公网 25 端口，不提供认证邮件提交，避免成为 open relay。
-出站入口默认仅接受本机 stdin 或 Unix socket，不对公网开放。
+picomail 只监听公网 25 端口，不提供认证邮件提交，避免成为 open relay。出站服务与
+picomail 不共享代码、进程、队列或权限；即使出站工具配置错误，也不会扩大公网入站
+服务的协议面。
 
 ## 存储布局
 
@@ -62,33 +62,36 @@ catch-all 会增加垃圾邮件与磁盘耗尽风险。“暂不做收信反垃�
 仍需拒绝未知域、过大邮件、过多收件人和超时连接。后续可以增加地址令牌或显式地址表，
 而不改变磁盘格式。
 
-## 出站与 Gmail 可投递性
+## 外部发信边界
 
-直接投递到 Gmail 不只取决于 SMTP 客户端。上线前至少需要：
+picomail 不实现 outbound SMTP。用户可以按需求选择：
 
-- 稳定公网 IP；正向 A/AAAA 与反向 PTR 一致；25 端口可出站；
-- envelope-from 的 SPF；From 域对齐的 DKIM；DMARC 记录；
-- opportunistic TLS、合规 RFC 5322 格式、稳定 EHLO 主机名；
-- 持久 outbox、指数退避、区分 4xx/5xx、退信保存和重复投递防护；
-- 低投诉率与逐步建立的 IP/域名信誉。
+- MUA 直接连接可信 SMTP relay：最少运维，适合人工写信；
+- OpenSMTPD outbound-only：配置较小，具备持久队列，DKIM 可交给独立 filter；
+- Postfix outbound-only：队列、重试、退信与运维生态最成熟，配置面相对较大；
+- msmtp：适合同步提交到 relay，但本身不作为可靠的持久队列；
+- dma：小型本地 MTA，适合通过 smarthost 发送。
 
-因此首版不提供“收到本地请求就同步直发”的假实现：没有 durable queue 会在进程崩溃或
-对方 4xx 时丢信；没有 DKIM 与域名配置也无法完成预期的 Gmail 投递目标。出站实现将是
-下一个独立里程碑。
+如果希望使用 `shop-name@example.net` 一类自定义发件地址，relay 应验证并授权整个
+`example.net` 域，而不是只授权一个 mailbox，并为该域生成对齐的 DKIM 签名。SPF、
+DKIM、DMARC、PTR、队列重试和 Gmail 可投递性全部属于所选 outbound 系统的责任。
+
+将 outbound 从 picomail 删除是安全边界，不只是延期：picomail 不读取 DKIM 私钥、不持有
+relay 凭据、不解析本地 submission，也不需要出站网络权限。随附的 systemd unit 进一步
+禁止 `connect(2)`，使服务即使出现意外代码路径也不能建立出站连接。
 
 ## 刻意不做
 
 - POP3、IMAP、Webmail、JMAP；
-- SMTP AUTH 或公网 submission 端口；
+- outbound SMTP、DKIM 签名、SMTP AUTH 或公网 submission 端口；
 - 服务器端全文索引（交给 notmuch）；
 - 数据库、消息去重、自动分类、入站内容反垃圾；
 - 任意转发规则和多租户管理面。
 
 ## 尚需管理员选择
 
-以下信息不阻塞入站核心和存储实现，但会阻塞真正公网部署或出站：
+以下信息不阻塞入站核心和存储实现，但会阻塞真正公网部署：
 
-1. 收发信域名、MX/EHLO 主机名，以及服务器是否有可设置 PTR 的固定 IPv4；
-2. 是坚持直接投递 Gmail，还是允许用一个轻量 SMTP relay 提升初期可投递性；
-3. catch-all 是否长期保留，还是以后只允许显式地址/带随机令牌的地址；
-4. Git 同步的拓扑（服务器 push、客户端 pull，或客户端经 SSH pull）以及邮件静态加密需求。
+1. 收信域名与 MX/EHLO 主机名；
+2. catch-all 是否长期保留，还是以后只允许显式地址/带随机令牌的地址；
+3. Git 同步的拓扑（服务器 push、客户端 pull，或客户端经 SSH pull）以及邮件静态加密需求。

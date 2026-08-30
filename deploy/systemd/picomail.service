@@ -42,6 +42,8 @@ RestrictNamespaces=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
+# picomail is receive-only: it accepts the activated socket but never connects out.
+SystemCallFilter=~connect
 SystemCallErrorNumber=EPERM
 
 [Install]

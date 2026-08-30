@@ -7,7 +7,7 @@
 - 用自己的域名收信，允许为每个网站使用不同地址；
 - 将原始邮件存入 append-only 文件树，可用 Git 同步、用 notmuch 索引；
 - 以尽量少的依赖和协议状态降低攻击面；
-- 最终支持经过 SPF、DKIM、DMARC 对齐的低流量出站邮件。
+- 发信由用户选择的 MUA、outbound MTA 或 SMTP relay 完成。
 
 当前仓库尚处于第一个可运行阶段。已经确定的范围和仍需选择的事项见
 [docs/design.md](docs/design.md)。
@@ -20,7 +20,8 @@
 - 支持 STARTTLS、systemd socket activation 和结构化日志；
 - 仅使用 Go 标准库。
 
-出站投递尚未实现。尤其不要把当前服务当成已具备 Gmail 可投递性的发送服务器。
+picomail 是永久 receive-only 服务，不会实现出站队列、DKIM 签名或向 Gmail 投递。
+发信程序与 picomail 只通过“使用同一个邮件域名”发生关系，不共享消息队列或状态。
 
 ## 开发
 
