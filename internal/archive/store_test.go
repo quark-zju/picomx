@@ -69,6 +69,30 @@ func TestDeliverUsesUniqueNamesAtSameInstant(t *testing.T) {
 	}
 }
 
+func TestDeliverNeverOverwritesExistingMessage(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	now := time.Unix(123, 456)
+	firstStore := newStore(root, "host", func() time.Time { return now })
+	secondStore := newStore(root, "host", func() time.Time { return now })
+
+	path, err := firstStore.Deliver(strings.NewReader("original"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := secondStore.Deliver(strings.NewReader("replacement")); err == nil {
+		t.Fatal("colliding delivery overwrote an existing archive path")
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(content), "original"; got != want {
+		t.Fatalf("existing message = %q, want %q", got, want)
+	}
+}
+
 func TestNewRejectsEmptyRoot(t *testing.T) {
 	t.Parallel()
 
