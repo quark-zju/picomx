@@ -53,7 +53,8 @@ notmuch 可以递归索引任意“一封邮件一个文件”的树，不要求
 - 支持 EHLO/HELO、MAIL FROM、RCPT TO、DATA、RSET、NOOP、QUIT；
 - 对命令行、DATA 行、总邮件大小、收件人数、并发连接和空闲时间设硬上限；
 - DATA 成功响应只在文件原子持久化之后返回；
-- 保存原始 RFC 5322 内容，并添加本机 `Received` 与 envelope recipient 元数据；
+- 保存原始 RFC 5322 内容，并在前面添加 `Return-Path`、`Delivered-To` 和本机
+  `Received` 投递头；
 - JSON 结构化日志只记录 envelope、大小、远端地址和结果，不记录正文；
 - 由 systemd socket activation 持有 25 端口，服务进程不使用 root。
 

@@ -12,6 +12,16 @@
 当前仓库尚处于第一个可运行阶段。已经确定的范围和仍需选择的事项见
 [docs/design.md](docs/design.md)。
 
+当前可运行范围是入站 SMTP 存档：
+
+- 只接受 `PICOMAIL_DOMAINS` 中域名的 catch-all 地址；
+- 不实现 SMTP AUTH，也不会向外部域 relay；
+- 将每封信原子发布为 `messages/YYYY/MM/*.eml`，发布后不再修改；
+- 支持 STARTTLS、systemd socket activation 和结构化日志；
+- 仅使用 Go 标准库。
+
+出站投递尚未实现。尤其不要把当前服务当成已具备 Gmail 可投递性的发送服务器。
+
 ## 开发
 
 需要 Go 1.24 或更高版本。
@@ -20,3 +30,36 @@
 make test
 make build
 ```
+
+本机开发可绕过 systemd，在非特权端口监听：
+
+```sh
+go run ./cmd/picomaild \
+  --listen 127.0.0.1:2525 \
+  --hostname mx.mail.example \
+  --domains mail.example \
+  --archive-root ./messages
+```
+
+不传 `--listen` 时，服务要求 systemd 传入监听 socket。公网部署的基本步骤是：
+
+```sh
+make deploy
+sudoedit /etc/picomail/picomail.env
+sudo systemctl enable --now picomail.socket
+journalctl -u picomail.service -f
+```
+
+`make deploy` 只安装程序、配置样例和 systemd unit，不会替你修改 DNS，也不会自动启动
+服务。启动前至少要把配置样例中的主机名、收件域和 TLS 证书路径改成真实值，并配置
+域名的 MX 记录。运行用户需要能读取证书私钥；邮件存档由 systemd 创建在
+`/var/lib/picomail/messages`，权限默认为仅 `picomail` 用户可访问。
+
+## notmuch 与 Git
+
+将 notmuch 的 database path 指向 `messages/` 后运行 `notmuch new` 即可索引。存档不是
+Maildir，因此 notmuch tags 只存在索引中，不会反写为文件名 flags。
+
+Git 只应同步年月目录。`messages/tmp/` 保存未发布写入并已由 `.gitignore` 排除；notmuch
+数据库也不应提交。服务端仓库如何安全地 push/pull 仍由部署者选择，当前守护进程不会
+执行 Git 命令或持有 Git 凭据。
