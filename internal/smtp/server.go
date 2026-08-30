@@ -1,5 +1,5 @@
 // Package smtp implements the deliberately small inbound SMTP surface used by
-// picomail. It is a final-delivery server, not a relay or submission server.
+// picomx. It is a final-delivery server, not a relay or submission server.
 package smtp
 
 import (
@@ -154,7 +154,7 @@ func (s *Server) serveConn(initialConn net.Conn) {
 	encrypted := false
 	tx := transaction{}
 
-	if !s.reply(conn, writer, 220, s.hostname+" ESMTP picomail") {
+	if !s.reply(conn, writer, 220, s.hostname+" ESMTP picomx") {
 		return
 	}
 	for {

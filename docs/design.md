@@ -1,8 +1,8 @@
-# picomail 设计草案
+# picomx 设计草案
 
 ## 目标
 
-picomail 服务一个管理员、少量域名和低邮件量。它偏向“可审计的小组件”，不追求
+picomx 服务一个管理员、少量域名和低邮件量。它偏向“可审计的小组件”，不追求
 Webmail、日历、通讯录、邮件列表、多租户管理或与现有 MTA 的插件兼容性。
 
 典型地址为 `shop-name@example.net`。首版对配置域名采用 catch-all：合法 local-part
@@ -12,7 +12,7 @@ Webmail、日历、通讯录、邮件列表、多租户管理或与现有 MTA �
 ## 协议边界
 
 ```text
-Internet MTA --SMTP/25--> picomaild --> append-only archive --> git / notmuch
+Internet MTA --SMTP/25--> picomxd --> append-only archive --> git / notmuch
 
 MUA --> 独立 outbound MTA 或 SMTP relay --> Gmail 等收件方
 ```
@@ -21,8 +21,8 @@ MUA --> 独立 outbound MTA 或 SMTP relay --> Gmail 等收件方
 仍然必须使用 SMTP。Git 同步的是关闭连接后已经原子落盘的文件，不同步临时文件，也
 不承载投递协议。
 
-picomail 只监听公网 25 端口，不提供认证邮件提交，避免成为 open relay。出站服务与
-picomail 不共享代码、进程、队列或权限；即使出站工具配置错误，也不会扩大公网入站
+picomx 只监听公网 25 端口，不提供认证邮件提交，避免成为 open relay。出站服务与
+picomx 不共享代码、进程、队列或权限；即使出站工具配置错误，也不会扩大公网入站
 服务的协议面。
 
 ## 存储布局
@@ -64,7 +64,7 @@ catch-all 会增加垃圾邮件与磁盘耗尽风险。“暂不做收信反垃�
 
 ## 外部发信边界
 
-picomail 不实现 outbound SMTP。用户可以按需求选择：
+picomx 不实现 outbound SMTP。用户可以按需求选择：
 
 - MUA 直接连接可信 SMTP relay：最少运维，适合人工写信；
 - OpenSMTPD outbound-only：配置较小，具备持久队列，DKIM 可交给独立 filter；
@@ -76,7 +76,7 @@ picomail 不实现 outbound SMTP。用户可以按需求选择：
 `example.net` 域，而不是只授权一个 mailbox，并为该域生成对齐的 DKIM 签名。SPF、
 DKIM、DMARC、PTR、队列重试和 Gmail 可投递性全部属于所选 outbound 系统的责任。
 
-将 outbound 从 picomail 删除是安全边界，不只是延期：picomail 不读取 DKIM 私钥、不持有
+将 outbound 从 picomx 删除是安全边界，不只是延期：picomx 不读取 DKIM 私钥、不持有
 relay 凭据、不解析本地 submission，也不需要出站网络权限。随附的 systemd unit 进一步
 禁止 `connect(2)`，使服务即使出现意外代码路径也不能建立出站连接。
 

@@ -1,4 +1,4 @@
-// Package systemd provides the small subset of socket activation picomail uses.
+// Package systemd provides the small subset of socket activation picomx uses.
 package systemd
 
 import (

@@ -15,23 +15,23 @@ import (
 	"syscall"
 	"time"
 
-	"picomail/internal/archive"
-	"picomail/internal/smtp"
-	"picomail/internal/systemd"
+	"picomx/internal/archive"
+	"picomx/internal/smtp"
+	"picomx/internal/systemd"
 )
 
 func main() {
 	var (
-		hostname          = flag.String("hostname", getenv("PICOMAIL_HOSTNAME", ""), "SMTP MX hostname")
-		domainsRaw        = flag.String("domains", getenv("PICOMAIL_DOMAINS", ""), "comma-separated recipient domains")
-		archiveRoot       = flag.String("archive-root", getenv("PICOMAIL_ARCHIVE_ROOT", "/var/lib/picomail/messages"), "append-only message archive")
-		listenAddress     = flag.String("listen", getenv("PICOMAIL_LISTEN", ""), "TCP address for development; default uses systemd socket activation")
-		certificatePath   = flag.String("tls-cert", getenv("PICOMAIL_TLS_CERT", ""), "STARTTLS certificate PEM")
-		privateKeyPath    = flag.String("tls-key", getenv("PICOMAIL_TLS_KEY", ""), "STARTTLS private key PEM")
-		maxMessageRaw     = flag.String("max-message-bytes", getenv("PICOMAIL_MAX_MESSAGE_BYTES", "26214400"), "maximum RFC 5322 message bytes")
-		maxRecipientsRaw  = flag.String("max-recipients", getenv("PICOMAIL_MAX_RECIPIENTS", "20"), "maximum recipients per message")
-		maxConnectionsRaw = flag.String("max-connections", getenv("PICOMAIL_MAX_CONNECTIONS", "64"), "maximum concurrent SMTP connections")
-		idleTimeoutRaw    = flag.String("idle-timeout", getenv("PICOMAIL_IDLE_TIMEOUT", "5m"), "SMTP session idle timeout")
+		hostname          = flag.String("hostname", getenv("PICOMX_HOSTNAME", ""), "SMTP MX hostname")
+		domainsRaw        = flag.String("domains", getenv("PICOMX_DOMAINS", ""), "comma-separated recipient domains")
+		archiveRoot       = flag.String("archive-root", getenv("PICOMX_ARCHIVE_ROOT", "/var/lib/picomx/messages"), "append-only message archive")
+		listenAddress     = flag.String("listen", getenv("PICOMX_LISTEN", ""), "TCP address for development; default uses systemd socket activation")
+		certificatePath   = flag.String("tls-cert", getenv("PICOMX_TLS_CERT", ""), "STARTTLS certificate PEM")
+		privateKeyPath    = flag.String("tls-key", getenv("PICOMX_TLS_KEY", ""), "STARTTLS private key PEM")
+		maxMessageRaw     = flag.String("max-message-bytes", getenv("PICOMX_MAX_MESSAGE_BYTES", "26214400"), "maximum RFC 5322 message bytes")
+		maxRecipientsRaw  = flag.String("max-recipients", getenv("PICOMX_MAX_RECIPIENTS", "20"), "maximum recipients per message")
+		maxConnectionsRaw = flag.String("max-connections", getenv("PICOMX_MAX_CONNECTIONS", "64"), "maximum concurrent SMTP connections")
+		idleTimeoutRaw    = flag.String("idle-timeout", getenv("PICOMX_IDLE_TIMEOUT", "5m"), "SMTP session idle timeout")
 	)
 	flag.Parse()
 

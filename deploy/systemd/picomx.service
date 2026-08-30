@@ -1,18 +1,18 @@
 [Unit]
-Description=picomail inbound SMTP archive
+Description=picomx inbound SMTP archive
 After=network-online.target
 Wants=network-online.target
-Requires=picomail.socket
+Requires=picomx.socket
 
 [Service]
 Type=simple
-User=picomail
-Group=picomail
-ExecStart=/usr/local/bin/picomaild
-EnvironmentFile=/etc/picomail/picomail.env
+User=picomx
+Group=picomx
+ExecStart=/usr/local/bin/picomxd
+EnvironmentFile=/etc/picomx/picomx.env
 Restart=on-failure
 RestartSec=2
-StateDirectory=picomail
+StateDirectory=picomx
 StateDirectoryMode=0700
 UMask=0077
 
@@ -42,7 +42,7 @@ RestrictNamespaces=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
-# picomail is receive-only: it accepts the activated socket but never connects out.
+# picomx is receive-only: it accepts the activated socket but never connects out.
 SystemCallFilter=~connect
 SystemCallErrorNumber=EPERM
 

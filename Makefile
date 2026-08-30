@@ -1,14 +1,14 @@
 SHELL := /bin/sh
 
-BINARY := picomaild
-BUILD_TARGET := ./cmd/picomaild
+BINARY := picomxd
+BUILD_TARGET := ./cmd/picomxd
 PREFIX ?= /usr/local/bin
 INSTALL_PATH := $(PREFIX)/$(BINARY)
 SYSTEMD_DIR ?= /etc/systemd/system
-CONFIG_DIR ?= /etc/picomail
-ENV_FILE ?= $(CONFIG_DIR)/picomail.env
-ENV_EXAMPLE := examples/picomail.env.example
-SERVICE_USER ?= picomail
+CONFIG_DIR ?= /etc/picomx
+ENV_FILE ?= $(CONFIG_DIR)/picomx.env
+ENV_EXAMPLE := examples/picomx.env.example
+SERVICE_USER ?= picomx
 SERVICE_GROUP ?= $(SERVICE_USER)
 SUDO ?= sudo
 
@@ -35,15 +35,15 @@ install-config:
 	$(SUDO) install -d -m 755 $(CONFIG_DIR)
 	@if [ ! -f $(ENV_FILE) ]; then \
 		$(SUDO) install -m 600 $(ENV_EXAMPLE) $(ENV_FILE); \
-		echo "edit $(ENV_FILE) before starting picomail.socket"; \
+		echo "edit $(ENV_FILE) before starting picomx.socket"; \
 	fi
 	@if ! getent passwd $(SERVICE_USER) >/dev/null; then \
 		$(SUDO) useradd --system --gid $(SERVICE_GROUP) --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin $(SERVICE_USER); \
 	fi
 
 install-systemd:
-	$(SUDO) install -m 644 deploy/systemd/picomail.service $(SYSTEMD_DIR)/picomail.service
-	$(SUDO) install -m 644 deploy/systemd/picomail.socket $(SYSTEMD_DIR)/picomail.socket
+	$(SUDO) install -m 644 deploy/systemd/picomx.service $(SYSTEMD_DIR)/picomx.service
+	$(SUDO) install -m 644 deploy/systemd/picomx.socket $(SYSTEMD_DIR)/picomx.socket
 	$(SUDO) systemctl daemon-reload
 
 deploy: setup-user install install-config install-systemd

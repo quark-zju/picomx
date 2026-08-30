@@ -1,5 +1,5 @@
 [Unit]
-Description=picomail inbound SMTP socket
+Description=picomx inbound SMTP socket
 
 [Socket]
 ListenStream=25

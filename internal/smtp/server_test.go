@@ -39,7 +39,9 @@ func TestServerDeliversLocalRecipientAndUnstuffsDots(t *testing.T) {
 
 	delivery := &memoryDelivery{}
 	client, responses := startTestSession(t, delivery, 1024)
-	expectCode(t, responses, 220)
+	if greeting := expectCode(t, responses, 220); !strings.Contains(greeting, "ESMTP picomx") {
+		t.Fatalf("greeting = %q, want picomx server identity", greeting)
+	}
 	writeLine(t, client, "EHLO sender.example")
 	expectCode(t, responses, 250)
 	expectCode(t, responses, 250)
