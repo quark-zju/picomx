@@ -1,0 +1,9 @@
+[Unit]
+Description=picomail inbound SMTP socket
+
+[Socket]
+ListenStream=25
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target
