@@ -1,5 +1,5 @@
-// Package maildir stores complete RFC 5322 messages in monthly Maildirs.
-package maildir
+// Package archive stores complete RFC 5322 messages in an append-only tree.
+package archive
 
 import (
 	"errors"
@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Store writes messages beneath Root/YYYY/MM/{tmp,new,cur}.
+// Store writes immutable messages beneath Root/YYYY/MM/.
 type Store struct {
 	root     string
 	hostname string
@@ -20,10 +20,10 @@ type Store struct {
 	sequence atomic.Uint64
 }
 
-// New returns a mail store rooted at root. Directories are created lazily.
+// New returns an archive rooted at root. Directories are created lazily.
 func New(root string) (*Store, error) {
 	if strings.TrimSpace(root) == "" {
-		return nil, errors.New("maildir root is required")
+		return nil, errors.New("message archive root is required")
 	}
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -40,38 +40,35 @@ func newStore(root, hostname string, now func() time.Time) *Store {
 	}
 }
 
-// Deliver durably writes one message and returns its final path. A successful
-// return means the file has been renamed into new/ and both it and its parent
-// directory have been synchronized.
+// Deliver durably publishes one immutable message and returns its final path.
+// It never overwrites an existing archive file.
 func (s *Store) Deliver(message io.Reader) (finalPath string, err error) {
 	now := s.now().UTC()
 	monthDir := filepath.Join(s.root, now.Format("2006"), now.Format("01"))
-	for _, name := range []string{"tmp", "new", "cur"} {
-		if err := os.MkdirAll(filepath.Join(monthDir, name), 0o700); err != nil {
-			return "", fmt.Errorf("create maildir %s: %w", name, err)
+	tmpDir := filepath.Join(s.root, "tmp")
+	for _, dir := range []string{monthDir, tmpDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", fmt.Errorf("create archive directory: %w", err)
 		}
 	}
 
 	filename := fmt.Sprintf(
-		"%d.%d_%d.%s",
+		"%d.%d_%d.%s.eml",
 		now.UnixNano(),
 		os.Getpid(),
 		s.sequence.Add(1),
 		s.hostname,
 	)
-	tmpPath := filepath.Join(monthDir, "tmp", filename)
-	finalPath = filepath.Join(monthDir, "new", filename)
+	tmpPath := filepath.Join(tmpDir, filename)
+	finalPath = filepath.Join(monthDir, filename)
 
 	file, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("create temporary message: %w", err)
 	}
-	keep := false
 	defer func() {
 		_ = file.Close()
-		if !keep {
-			_ = os.Remove(tmpPath)
-		}
+		_ = os.Remove(tmpPath)
 	}()
 
 	if _, err = io.Copy(file, message); err != nil {
@@ -83,18 +80,19 @@ func (s *Store) Deliver(message io.Reader) (finalPath string, err error) {
 	if err = file.Close(); err != nil {
 		return "", fmt.Errorf("close message: %w", err)
 	}
-	if err = os.Rename(tmpPath, finalPath); err != nil {
-		return "", fmt.Errorf("publish message: %w", err)
+	// Link, unlike Rename, fails if finalPath already exists. Both directories
+	// live under the same archive root and therefore on the same filesystem.
+	if err = os.Link(tmpPath, finalPath); err != nil {
+		return "", fmt.Errorf("publish message without overwrite: %w", err)
 	}
-	keep = true
 
-	newDir, openErr := os.Open(filepath.Join(monthDir, "new"))
+	finalDir, openErr := os.Open(monthDir)
 	if openErr != nil {
-		return "", fmt.Errorf("open maildir for sync: %w", openErr)
+		return "", fmt.Errorf("open archive for sync: %w", openErr)
 	}
-	defer newDir.Close()
-	if err = newDir.Sync(); err != nil {
-		return "", fmt.Errorf("sync maildir: %w", err)
+	defer finalDir.Close()
+	if err = finalDir.Sync(); err != nil {
+		return "", fmt.Errorf("sync archive: %w", err)
 	}
 	return finalPath, nil
 }

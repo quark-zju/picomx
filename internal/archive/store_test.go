@@ -1,4 +1,4 @@
-package maildir
+package archive
 
 import (
 	"os"
@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func TestDeliverWritesMessageAtomicallyToMonthlyMaildir(t *testing.T) {
+func TestDeliverPublishesImmutableMessageInMonthlyArchive(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -19,10 +19,10 @@ func TestDeliverWritesMessageAtomicallyToMonthlyMaildir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := filepath.Dir(path), filepath.Join(root, "2026", "08", "new"); got != want {
+	if got, want := filepath.Dir(path), filepath.Join(root, "2026", "08"); got != want {
 		t.Fatalf("message directory = %q, want %q", got, want)
 	}
-	if !strings.HasSuffix(path, ".mail_host") {
+	if !strings.HasSuffix(path, ".mail_host.eml") {
 		t.Fatalf("unsafe hostname was not sanitized in %q", path)
 	}
 
@@ -40,7 +40,7 @@ func TestDeliverWritesMessageAtomicallyToMonthlyMaildir(t *testing.T) {
 	if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
 		t.Fatalf("mode = %o, want %o", got, want)
 	}
-	entries, err := os.ReadDir(filepath.Join(root, "2026", "08", "tmp"))
+	entries, err := os.ReadDir(filepath.Join(root, "tmp"))
 	if err != nil {
 		t.Fatal(err)
 	}

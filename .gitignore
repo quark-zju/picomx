@@ -1,4 +1,4 @@
 /picomaild
-mail/**/tmp/*
+messages/tmp/*
 .notmuch/
 .notmuch-config

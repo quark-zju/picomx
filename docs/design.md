@@ -12,7 +12,7 @@ Webmail、日历、通讯录、邮件列表、多租户管理或与现有 MTA �
 ## 协议边界
 
 ```text
-Internet MTA --SMTP/25--> picomaild --> Maildir --> git / notmuch / 本地客户端
+Internet MTA --SMTP/25--> picomaild --> append-only archive --> git / notmuch
 
 本地写信工具 --> durable outbox --> DKIM signer --> SMTP/MX --> Gmail 等收件方
 ```
@@ -27,25 +27,25 @@ systemd 权限。入站服务只监听公网 25 端口，不提供认证邮件�
 
 ## 存储布局
 
-每个月是一个 Maildir：
+存档按年月分区，不保存可变的已读状态：
 
 ```text
-mail/
+messages/
+  tmp/
   2026/
     08/
-      tmp/
-      new/
-        1788070123.12345_1.host
-      cur/
+      1788070123.12345_1.host.eml
 ```
 
-邮件先以 `0600` 权限写入同一 Maildir 的 `tmp/`，执行 `fsync`，再用 rename 原子移动
-到 `new/`。文件名由时间、进程号、单调计数和主机名组成，不使用主题、地址或
-Message-ID。notmuch 可以递归索引这种“一封邮件一个文件”的树；每月保留完整
-`tmp/new/cur` 结构还可启用标准 Maildir flag 同步。
+邮件先以 `0600` 权限写入同一文件系统的 `tmp/` 并执行 `fsync`，再用 hard link 原子
+发布到年月目录。hard link 在目标已存在时失败，因此不会像 rename 那样覆盖已有文件。
+成功发布后的文件不改名、不改内容、不表达已读状态。文件名由时间、进程号、单调计数
+和主机名组成，不使用主题、地址或 Message-ID。
 
-Git 仓库只提交 `new/` 和 `cur/`。`.gitignore` 忽略 `tmp/`，避免同步半封邮件。
-notmuch 数据库不应提交：它可重建、经常变化，并包含可还原的邮件内容。
+notmuch 可以递归索引任意“一封邮件一个文件”的树，不要求 Maildir；只是这种布局不能
+把 notmuch tags 同步为文件名 flags，符合存档不可变的目标。Git 仓库提交年月目录，
+`.gitignore` 忽略 `tmp/`，避免同步半封邮件。notmuch 数据库不应提交：它可重建、
+经常变化，并包含可还原的邮件内容。
 
 ## 入站 SMTP 的首版约束
 
@@ -91,4 +91,3 @@ catch-all 会增加垃圾邮件与磁盘耗尽风险。“暂不做收信反垃�
 2. 是坚持直接投递 Gmail，还是允许用一个轻量 SMTP relay 提升初期可投递性；
 3. catch-all 是否长期保留，还是以后只允许显式地址/带随机令牌的地址；
 4. Git 同步的拓扑（服务器 push、客户端 pull，或客户端经 SSH pull）以及邮件静态加密需求。
-
