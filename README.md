@@ -69,6 +69,8 @@ journalctl -u picomx.service -f
 ```dns
 mx.example.net.  IN A   203.0.113.10
 example.net.     IN MX  10 mx.example.net.
+@                IN TXT "v=spf1 -all"
+_dmarc           IN TXT "v=DMARC1; p=reject;"
 ```
 
 如果服务器使用 IPv6，同时添加正确的 `AAAA` 记录；如果 IPv6 不可用，不要添加会把
