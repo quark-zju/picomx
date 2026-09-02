@@ -204,12 +204,13 @@ func protocolForListener(listener net.Listener) (protocol, error) {
 		return "", fmt.Errorf("cannot classify activated listener %q", listener.Addr())
 	}
 	switch address.Port {
-	case 25:
-		return protocolSMTP, nil
 	case 995:
 		return protocolPOP3S, nil
 	default:
-		return "", fmt.Errorf("unsupported activated TCP port %d", address.Port)
+		// The SMTP port is configured by systemd, so it need not be 25.
+		// POP3S is the only activated protocol that requires a distinct
+		// port to classify; every other activated TCP listener is SMTP.
+		return protocolSMTP, nil
 	}
 }
 

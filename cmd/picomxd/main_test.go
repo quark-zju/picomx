@@ -20,6 +20,7 @@ func TestProtocolForActivatedListener(t *testing.T) {
 		want protocol
 	}{
 		{port: 25, want: protocolSMTP},
+		{port: 2525, want: protocolSMTP},
 		{port: 995, want: protocolPOP3S},
 	}
 	for _, test := range tests {
@@ -34,11 +35,15 @@ func TestProtocolForActivatedListener(t *testing.T) {
 	}
 }
 
-func TestProtocolForActivatedListenerRejectsUnknownPort(t *testing.T) {
+func TestProtocolForActivatedListenerTreatsNonPOP3SPortAsSMTP(t *testing.T) {
 	t.Parallel()
 
 	listener := addressOnlyListener{address: &net.TCPAddr{Port: 443}}
-	if _, err := protocolForListener(listener); err == nil {
-		t.Fatal("protocolForListener accepted port 443")
+	got, err := protocolForListener(listener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != protocolSMTP {
+		t.Fatalf("port 443 protocol = %q, want %q", got, protocolSMTP)
 	}
 }
