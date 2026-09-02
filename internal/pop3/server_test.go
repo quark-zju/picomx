@@ -3,10 +3,14 @@ package pop3
 import (
 	"bufio"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -182,6 +186,43 @@ func TestServeRequiresImplicitTLS(t *testing.T) {
 	}
 	if err := server.Serve(nil, nil); err == nil {
 		t.Fatal("Serve accepted a nil TLS configuration")
+	}
+}
+
+func TestServeNegotiatesTLSBeforeGreeting(t *testing.T) {
+	t.Parallel()
+
+	fixture := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	serverTLS := fixture.TLS.Clone()
+	fixture.Close()
+
+	server, err := NewServer(Options{Hostname: "pop.example.com", Mailbox: fakeMailbox{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.Serve(listener, serverTLS) }()
+
+	client, err := tls.Dial("tcp", listener.Addr().String(), &tls.Config{
+		InsecureSkipVerify: true, // The fixture is a generated test certificate.
+		MinVersion:         tls.VersionTLS12,
+	})
+	if err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+	responses := bufio.NewReader(client)
+	expectLine(t, responses, "+OK pop.example.com picomx ready")
+	writeLine(t, client, "QUIT")
+	expectLine(t, responses, "+OK bye")
+	_ = client.Close()
+	_ = listener.Close()
+	if err := <-errCh; !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Serve returned %v, want net.ErrClosed", err)
 	}
 }
 
