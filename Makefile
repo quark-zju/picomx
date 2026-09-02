@@ -10,9 +10,11 @@ ENV_FILE ?= $(CONFIG_DIR)/picomx.env
 ENV_EXAMPLE := examples/picomx.env.example
 SERVICE_USER ?= picomx
 SERVICE_GROUP ?= $(SERVICE_USER)
+FAIL2BAN_FILTER_DIR ?= /etc/fail2ban/filter.d
+FAIL2BAN_JAIL_DIR ?= /etc/fail2ban/jail.d
 SUDO ?= sudo
 
-.PHONY: build test fmt install setup-user install-config install-systemd deploy
+.PHONY: build test fmt install setup-user install-config install-systemd install-fail2ban deploy deploy-fail2ban
 
 build:
 	go build -o $(BINARY) $(BUILD_TARGET)
@@ -58,4 +60,16 @@ install-systemd:
 	$(SUDO) install -m 644 deploy/systemd/picomx.socket $(SYSTEMD_DIR)/picomx.socket
 	$(SUDO) systemctl daemon-reload
 
+install-fail2ban:
+	@if ! command -v fail2ban-client >/dev/null 2>&1; then \
+		echo "fail2ban-client is required; install fail2ban first" >&2; \
+		exit 1; \
+	fi
+	$(SUDO) install -d -m 755 $(FAIL2BAN_FILTER_DIR) $(FAIL2BAN_JAIL_DIR)
+	$(SUDO) install -m 644 deploy/fail2ban/filter.d/picomx.conf $(FAIL2BAN_FILTER_DIR)/picomx.conf
+	$(SUDO) install -m 644 deploy/fail2ban/jail.d/picomx.local $(FAIL2BAN_JAIL_DIR)/picomx.local
+
 deploy: setup-user install install-config install-systemd
+
+deploy-fail2ban: install-fail2ban
+	$(SUDO) fail2ban-client reload

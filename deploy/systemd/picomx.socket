@@ -1,8 +1,9 @@
 [Unit]
-Description=picomx inbound SMTP socket
+Description=picomx SMTP and POP3S sockets
 
 [Socket]
 ListenStream=25
+ListenStream=995
 NoDelay=true
 
 [Install]

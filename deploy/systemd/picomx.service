@@ -1,5 +1,5 @@
 [Unit]
-Description=picomx inbound SMTP archive
+Description=picomx SMTP archive and POP3S access
 After=network-online.target
 Wants=network-online.target
 Requires=picomx.socket
@@ -23,6 +23,7 @@ PrivateIPC=yes
 PrivateUsers=yes
 ProtectSystem=strict
 ProtectHome=yes
+ReadOnlyPaths=-/etc/picosrv/certs
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes

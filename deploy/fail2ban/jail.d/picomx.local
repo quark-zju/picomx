@@ -1,0 +1,10 @@
+[picomx]
+enabled = true
+backend = systemd
+filter = picomx
+port = pop3s
+usedns = no
+
+findtime = 10m
+maxretry = 5
+bantime = 1h
