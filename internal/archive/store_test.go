@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,7 +107,7 @@ func TestStageRemainsInvisibleUntilPublish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	content, err := os.ReadFile(file.Name())
+	content, err := io.ReadAll(file)
 	_ = file.Close()
 	if err != nil {
 		t.Fatal(err)

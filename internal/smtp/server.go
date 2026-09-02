@@ -11,12 +11,14 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/mail"
 	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"picomx/internal/archive"
 	"picomx/internal/config"
 )
 
@@ -34,9 +36,10 @@ var (
 	errDataLineTooLong = errors.New("SMTP DATA line exceeds limit")
 )
 
-// Delivery persists one complete RFC 5322 message.
+// Delivery stages and durably publishes complete RFC 5322 messages.
 type Delivery interface {
-	Deliver(message io.Reader) (string, error)
+	Stage(message io.Reader) (archive.Staged, error)
+	Publish(archive.Staged) (uint64, string, error)
 }
 
 // Options configures an inbound server.
@@ -284,9 +287,10 @@ func (s *Server) serveConn(initialConn net.Conn) {
 			if !s.reply(conn, writer, 354, "end with <CRLF>.<CRLF>") {
 				return
 			}
-			headers := s.deliveryHeaders(remote, helo, encrypted, tx)
+			receivedAt := time.Now().UTC()
+			headers := s.deliveryHeaders(remote, helo, encrypted, tx, receivedAt)
 			data := &dataReader{reader: reader, maxBytes: s.maxMessageSize}
-			path, deliverErr := s.delivery.Deliver(io.MultiReader(strings.NewReader(headers), data))
+			staged, deliverErr := s.delivery.Stage(io.MultiReader(strings.NewReader(headers), data))
 			if deliverErr != nil {
 				code, message := 451, "4.3.0 temporary local failure"
 				if errors.Is(deliverErr, errMessageTooLarge) {
@@ -299,11 +303,45 @@ func (s *Server) serveConn(initialConn net.Conn) {
 				s.reply(conn, writer, code, message)
 				return // DATA may not be synchronized after a streaming error.
 			}
+			request := &messageRequest{
+				staged: staged,
+				metadata: config.MessageMetadata{
+					Connection:   connectionInfo(remote, helo, encrypted),
+					EnvelopeFrom: envelopeAddress(tx.from),
+					Recipients:   envelopeAddresses(tx.recipients),
+					ReceivedAt:   receivedAt,
+					Octets:       staged.Size(),
+				},
+			}
+			decision := s.evaluateMessage(request)
+			if decision.Action != config.MessageAccept {
+				_ = staged.Discard()
+				code, message := 451, "4.7.1 message temporarily rejected"
+				if decision.Action == config.MessageRejectPolicy {
+					code, message = 550, "5.7.1 message rejected by policy"
+				}
+				s.logger.Info("SMTP message policy decision",
+					"remote_ip", remote,
+					"policy_action", decision.Action,
+					"policy_reason", truncateReason(decision.Reason),
+				)
+				tx = transaction{}
+				s.reply(conn, writer, code, message)
+				continue
+			}
+			messageID, path, deliverErr := s.delivery.Publish(staged)
+			if deliverErr != nil {
+				_ = staged.Discard()
+				s.logger.Warn("message publication failed", "remote_ip", remote, "error", deliverErr)
+				s.reply(conn, writer, 451, "4.3.0 temporary local failure")
+				return
+			}
 			s.logger.Info("message delivered",
 				"remote_ip", remote,
 				"envelope_from", tx.from,
 				"recipients", tx.recipients,
 				"bytes", data.bytesRead,
+				"message_id", messageID,
 				"path", path,
 				"tls", encrypted,
 			)
@@ -321,6 +359,41 @@ func (s *Server) serveConn(initialConn net.Conn) {
 			s.reply(conn, writer, 502, "5.5.1 command not implemented")
 		}
 	}
+}
+
+type messageRequest struct {
+	staged     archive.Staged
+	metadata   config.MessageMetadata
+	headerOnce sync.Once
+	header     mail.Header
+}
+
+func (r *messageRequest) Metadata() config.MessageMetadata { return r.metadata }
+
+func (r *messageRequest) Open() (io.ReadCloser, error) { return r.staged.Open() }
+
+func (r *messageRequest) Header() mail.Header {
+	r.headerOnce.Do(func() {
+		file, err := r.staged.Open()
+		if err != nil {
+			return
+		}
+		defer file.Close()
+		message, err := mail.ReadMessage(io.LimitReader(file, 1<<20))
+		if err == nil {
+			r.header = message.Header
+		}
+	})
+	return r.header
+}
+
+func (s *Server) evaluateMessage(request config.MessageRequest) (decision config.MessageDecision) {
+	defer func() {
+		if recover() != nil {
+			decision = config.MessageDecision{Action: config.MessageTempFail, Reason: "policy_panic"}
+		}
+	}()
+	return s.policy.EvaluateMessage(request)
 }
 
 func (s *Server) evaluateRecipient(request config.RecipientRequest) (decision config.RecipientDecision) {
@@ -354,6 +427,14 @@ func envelopeAddress(address string) config.Address {
 	return config.Address{Local: local, Domain: normalizeDomain(domain)}
 }
 
+func envelopeAddresses(addresses []string) []config.Address {
+	result := make([]config.Address, len(addresses))
+	for index, address := range addresses {
+		result[index] = envelopeAddress(address)
+	}
+	return result
+}
+
 func truncateReason(reason string) string {
 	const limit = 128
 	if len(reason) <= limit {
@@ -362,7 +443,7 @@ func truncateReason(reason string) string {
 	return reason[:limit]
 }
 
-func (s *Server) deliveryHeaders(remote, helo string, encrypted bool, tx transaction) string {
+func (s *Server) deliveryHeaders(remote, helo string, encrypted bool, tx transaction, receivedAt time.Time) string {
 	var headers strings.Builder
 	if tx.from == "" {
 		headers.WriteString("Return-Path: <>\r\n")
@@ -379,7 +460,7 @@ func (s *Server) deliveryHeaders(remote, helo string, encrypted bool, tx transac
 		remote,
 		s.hostname,
 		map[bool]string{true: "E", false: ""}[encrypted],
-		time.Now().UTC().Format(time.RFC1123Z),
+		receivedAt.Format(time.RFC1123Z),
 	)
 	return headers.String()
 }

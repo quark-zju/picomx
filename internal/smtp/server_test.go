@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"picomx/internal/archive"
 	"picomx/internal/config"
 )
 
@@ -21,25 +22,46 @@ type memoryDelivery struct {
 
 type testPolicy struct {
 	recipient func(config.RecipientRequest) config.RecipientDecision
+	message   func(config.MessageRequest) config.MessageDecision
 }
 
 func (p testPolicy) EvaluateRecipient(request config.RecipientRequest) config.RecipientDecision {
+	if p.recipient == nil {
+		return config.RecipientDecision{Action: config.RecipientAccept}
+	}
 	return p.recipient(request)
 }
 
-func (testPolicy) EvaluateMessage(config.MessageRequest) config.MessageDecision {
+func (p testPolicy) EvaluateMessage(request config.MessageRequest) config.MessageDecision {
+	if p.message != nil {
+		return p.message(request)
+	}
 	return config.MessageDecision{Action: config.MessageAccept}
 }
 
-func (d *memoryDelivery) Deliver(message io.Reader) (string, error) {
+type memoryStaged struct{ content []byte }
+
+func (m *memoryStaged) Open() (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(m.content)), nil
+}
+func (m *memoryStaged) Size() uint64   { return uint64(len(m.content)) }
+func (m *memoryStaged) Discard() error { return nil }
+
+func (d *memoryDelivery) Stage(message io.Reader) (archive.Staged, error) {
 	content, err := io.ReadAll(message)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
+	return &memoryStaged{content: content}, nil
+}
+
+func (d *memoryDelivery) Publish(staged archive.Staged) (uint64, string, error) {
+	message := staged.(*memoryStaged)
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.messages = append(d.messages, content)
-	return fmt.Sprintf("message-%d", len(d.messages)), nil
+	d.messages = append(d.messages, message.content)
+	id := uint64(len(d.messages))
+	return id, fmt.Sprintf("message-%d", id), nil
 }
 
 func (d *memoryDelivery) all() [][]byte {
@@ -236,6 +258,37 @@ func TestServerAppliesRecipientPolicyAfterDomainBoundary(t *testing.T) {
 		if request.Recipient.Domain != "mail.example" {
 			t.Fatalf("recipient = %+v", request.Recipient)
 		}
+	}
+}
+
+func TestServerEvaluatesCompleteMessageBeforePublication(t *testing.T) {
+	t.Parallel()
+
+	delivery := &memoryDelivery{}
+	policy := testPolicy{message: func(request config.MessageRequest) config.MessageDecision {
+		metadata := request.Metadata()
+		if len(metadata.Recipients) != 1 || metadata.Recipients[0].String() != "offers@mail.example" {
+			return config.MessageDecision{Action: config.MessageTempFail, Reason: "bad_metadata"}
+		}
+		if request.Header().Get("Subject") == "reject me" {
+			return config.MessageDecision{Action: config.MessageRejectPolicy, Reason: "subject_rule"}
+		}
+		return config.MessageDecision{Action: config.MessageAccept}
+	}}
+	client, responses := startTestSessionWithPolicy(t, delivery, 1024, policy)
+	expectCode(t, responses, 220)
+	writeLine(t, client, "HELO sender.example")
+	expectCode(t, responses, 250)
+	writeLine(t, client, "MAIL FROM:<sender@sender.example>")
+	expectCode(t, responses, 250)
+	writeLine(t, client, "RCPT TO:<offers@mail.example>")
+	expectCode(t, responses, 250)
+	writeLine(t, client, "DATA")
+	expectCode(t, responses, 354)
+	writeRaw(t, client, "Subject: reject me\r\n\r\nbody\r\n.\r\n")
+	expectCode(t, responses, 550)
+	if got := len(delivery.all()); got != 0 {
+		t.Fatalf("published %d policy-rejected messages", got)
 	}
 }
 

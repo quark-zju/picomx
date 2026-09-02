@@ -26,6 +26,13 @@ type StagedMessage struct {
 	size  uint64
 }
 
+// Staged is the protocol-neutral unpublished message capability.
+type Staged interface {
+	Open() (io.ReadCloser, error)
+	Size() uint64
+	Discard() error
+}
+
 // New opens the single-writer archive rooted at root.
 func New(root string) (*Store, error) {
 	if strings.TrimSpace(root) == "" {
@@ -55,7 +62,7 @@ func (s *Store) Deliver(message io.Reader) (finalPath string, err error) {
 }
 
 // Stage writes and syncs a complete message without assigning an archive ID.
-func (s *Store) Stage(message io.Reader) (*StagedMessage, error) {
+func (s *Store) Stage(message io.Reader) (Staged, error) {
 	tmpDir := filepath.Join(s.root, "tmp")
 	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create temporary archive directory: %w", err)
@@ -88,7 +95,7 @@ func (s *Store) Stage(message io.Reader) (*StagedMessage, error) {
 }
 
 // Open opens the unpublished staged content for policy inspection.
-func (m *StagedMessage) Open() (*os.File, error) {
+func (m *StagedMessage) Open() (io.ReadCloser, error) {
 	if m == nil || m.path == "" {
 		return nil, errors.New("staged message is unavailable")
 	}
@@ -116,8 +123,9 @@ func (m *StagedMessage) Discard() error {
 }
 
 // Publish assigns the next ID and atomically makes a staged message visible.
-func (s *Store) Publish(staged *StagedMessage) (id uint64, finalPath string, err error) {
-	if staged == nil || staged.store != s || staged.path == "" {
+func (s *Store) Publish(staged Staged) (id uint64, finalPath string, err error) {
+	message, ok := staged.(*StagedMessage)
+	if !ok || message == nil || message.store != s || message.path == "" {
 		return 0, "", errors.New("staged message does not belong to this store")
 	}
 	s.mu.Lock()
@@ -136,10 +144,10 @@ func (s *Store) Publish(staged *StagedMessage) (id uint64, finalPath string, err
 	if err := os.MkdirAll(finalDir, 0o700); err != nil {
 		return 0, "", fmt.Errorf("create archive directory: %w", err)
 	}
-	if staged.size > math.MaxUint64-s.state.TotalOctets {
+	if message.size > math.MaxUint64-s.state.TotalOctets {
 		return 0, "", errors.New("mailbox octet count overflow")
 	}
-	if err := os.Link(staged.path, finalPath); err != nil {
+	if err := os.Link(message.path, finalPath); err != nil {
 		return 0, "", fmt.Errorf("publish message without overwrite: %w", err)
 	}
 	if err := syncDirectory(finalDir); err != nil {
@@ -149,13 +157,13 @@ func (s *Store) Publish(staged *StagedMessage) (id uint64, finalPath string, err
 	nextState := mailboxState{
 		Version:     mailboxStateVersion,
 		LastID:      nextID,
-		TotalOctets: s.state.TotalOctets + staged.size,
+		TotalOctets: s.state.TotalOctets + message.size,
 	}
 	if err := writeMailboxState(s.root, nextState); err != nil {
 		return 0, "", err
 	}
 	s.state = nextState
-	_ = staged.Discard()
+	_ = message.Discard()
 	return nextID, finalPath, nil
 }
 
