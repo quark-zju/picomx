@@ -98,6 +98,39 @@ func TestServerRejectsRelayRecipient(t *testing.T) {
 	}
 }
 
+func TestServerCanonicalizesBareLFData(t *testing.T) {
+	t.Parallel()
+
+	delivery := &memoryDelivery{}
+	client, responses := startTestSession(t, delivery, 1024)
+	expectCode(t, responses, 220)
+	writeLine(t, client, "HELO sender.example")
+	expectCode(t, responses, 250)
+	writeLine(t, client, "MAIL FROM:<sender@sender.example>")
+	expectCode(t, responses, 250)
+	writeLine(t, client, "RCPT TO:<offers@mail.example>")
+	expectCode(t, responses, 250)
+	writeLine(t, client, "DATA")
+	expectCode(t, responses, 354)
+	writeRaw(t, client, "Subject: bare LF\n\nbody\n.\n")
+	expectCode(t, responses, 250)
+	writeLine(t, client, "QUIT")
+	expectCode(t, responses, 221)
+	_ = client.Close()
+
+	messages := delivery.all()
+	if len(messages) != 1 {
+		t.Fatalf("delivered %d messages, want 1", len(messages))
+	}
+	message := messages[0]
+	if bytes.Contains(bytes.ReplaceAll(message, []byte("\r\n"), nil), []byte("\n")) {
+		t.Fatalf("message contains bare LF:\n%q", message)
+	}
+	if !bytes.Contains(message, []byte("Subject: bare LF\r\n\r\nbody\r\n")) {
+		t.Fatalf("message body was not canonicalized:\n%q", message)
+	}
+}
+
 func TestServerRejectsOversizedStreamingMessage(t *testing.T) {
 	t.Parallel()
 

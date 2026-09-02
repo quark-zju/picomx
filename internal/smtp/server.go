@@ -373,12 +373,26 @@ func (r *dataReader) Read(buffer []byte) (int, error) {
 	if len(line) >= 2 && line[0] == '.' && line[1] == '.' {
 		line = line[1:]
 	}
+	line = canonicalDataLine(line)
+	if len(line) > maxDataLineBytes {
+		return 0, errDataLineTooLong
+	}
 	if r.bytesRead+int64(len(line)) > r.maxBytes {
 		return 0, errMessageTooLarge
 	}
 	r.bytesRead += int64(len(line))
 	r.pending = line
 	return r.Read(buffer)
+}
+
+func canonicalDataLine(line []byte) []byte {
+	line = bytes.TrimSuffix(line, []byte("\n"))
+	line = bytes.TrimSuffix(line, []byte("\r"))
+	canonical := make([]byte, len(line)+2)
+	copy(canonical, line)
+	canonical[len(line)] = '\r'
+	canonical[len(line)+1] = '\n'
+	return canonical
 }
 
 func readLimitedLine(reader *bufio.Reader, limit int) (string, error) {
