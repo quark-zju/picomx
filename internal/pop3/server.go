@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,14 +20,15 @@ const (
 	maxCommandBytes    = 255
 )
 
-type snapshotter interface {
+type mailbox interface {
 	Snapshot() archive.Snapshot
+	Size(uint64) (uint64, error)
 }
 
 // Options configures the POP3 protocol state machine.
 type Options struct {
 	Hostname        string
-	Mailbox         snapshotter
+	Mailbox         mailbox
 	Credentials     Credentials
 	IdleTimeout     time.Duration
 	MaxAuthFailures int
@@ -36,7 +38,7 @@ type Options struct {
 // Server serves one read-only maildrop.
 type Server struct {
 	hostname        string
-	mailbox         snapshotter
+	mailbox         mailbox
 	credentials     Credentials
 	idleTimeout     time.Duration
 	maxAuthFailures int
@@ -136,6 +138,56 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 			authenticated = true
 			snapshot = s.mailbox.Snapshot()
 			s.reply(conn, writer, fmt.Sprintf("+OK maildrop ready with %d messages", snapshot.LastID))
+		case "STAT":
+			if !authenticated || argument != "" {
+				s.reply(conn, writer, "-ERR command not valid now")
+				continue
+			}
+			s.reply(conn, writer, fmt.Sprintf("+OK %d %d", snapshot.LastID, snapshot.TotalOctets))
+		case "LIST":
+			if !authenticated {
+				s.reply(conn, writer, "-ERR authenticate first")
+				continue
+			}
+			if argument != "" {
+				id, ok := messageID(argument, snapshot.LastID)
+				if !ok {
+					s.reply(conn, writer, "-ERR no such message")
+					continue
+				}
+				size, err := s.mailbox.Size(id)
+				if err != nil {
+					s.reply(conn, writer, "-ERR unable to inspect message")
+					continue
+				}
+				s.reply(conn, writer, fmt.Sprintf("+OK %d %d", id, size))
+				continue
+			}
+			if !s.writeListing(conn, writer, snapshot.LastID, func(id uint64) (string, error) {
+				size, err := s.mailbox.Size(id)
+				return fmt.Sprintf("%d %d", id, size), err
+			}) {
+				return
+			}
+		case "UIDL":
+			if !authenticated {
+				s.reply(conn, writer, "-ERR authenticate first")
+				continue
+			}
+			if argument != "" {
+				id, ok := messageID(argument, snapshot.LastID)
+				if !ok {
+					s.reply(conn, writer, "-ERR no such message")
+					continue
+				}
+				s.reply(conn, writer, fmt.Sprintf("+OK %d %s", id, uniqueID(id)))
+				continue
+			}
+			if !s.writeListing(conn, writer, snapshot.LastID, func(id uint64) (string, error) {
+				return fmt.Sprintf("%d %s", id, uniqueID(id)), nil
+			}) {
+				return
+			}
 		case "QUIT":
 			if argument != "" {
 				s.reply(conn, writer, "-ERR invalid arguments")
@@ -181,6 +233,9 @@ func (s *Server) reply(conn net.Conn, writer *bufio.Writer, line string) bool {
 }
 
 func (s *Server) replyMulti(conn net.Conn, writer *bufio.Writer, lines []string) bool {
+	if err := conn.SetWriteDeadline(time.Now().Add(s.idleTimeout)); err != nil {
+		return false
+	}
 	for _, line := range lines {
 		if _, err := writer.WriteString(line + "\r\n"); err != nil {
 			return false
@@ -190,6 +245,42 @@ func (s *Server) replyMulti(conn net.Conn, writer *bufio.Writer, lines []string)
 		return false
 	}
 	return writer.Flush() == nil
+}
+
+func (s *Server) writeListing(conn net.Conn, writer *bufio.Writer, lastID uint64, row func(uint64) (string, error)) bool {
+	if err := conn.SetWriteDeadline(time.Now().Add(s.idleTimeout)); err != nil {
+		return false
+	}
+	if _, err := writer.WriteString("+OK listing follows\r\n"); err != nil {
+		return false
+	}
+	if lastID > 0 {
+		for id := uint64(1); ; id++ {
+			line, err := row(id)
+			if err != nil {
+				return false
+			}
+			if _, err := writer.WriteString(line + "\r\n"); err != nil {
+				return false
+			}
+			if id == lastID {
+				break
+			}
+		}
+	}
+	if _, err := writer.WriteString(".\r\n"); err != nil {
+		return false
+	}
+	return writer.Flush() == nil
+}
+
+func messageID(argument string, lastID uint64) (uint64, bool) {
+	id, err := strconv.ParseUint(strings.TrimSpace(argument), 10, 64)
+	return id, err == nil && id > 0 && id <= lastID
+}
+
+func uniqueID(id uint64) string {
+	return "picomx-" + strconv.FormatUint(id, 36)
 }
 
 func clientIP(address net.Addr) string {
