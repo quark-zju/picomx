@@ -12,7 +12,9 @@ Webmail、日历、通讯录、邮件列表、多租户管理或与现有 MTA �
 ## 协议边界
 
 ```text
-Internet MTA --SMTP/25--> picomxd --> append-only archive --> git / notmuch
+Internet MTA --SMTP/25--> picomx-smtpd --> append-only archive --> git / notmuch
+                                           |
+MUA <--POP3S/995-- picomx-pop3d <-----------+
 
 MUA --> 独立 outbound MTA 或 SMTP relay --> Gmail 等收件方
 ```
@@ -82,7 +84,7 @@ relay 凭据、不解析本地 submission，也不需要出站网络权限。随
 
 ## 刻意不做
 
-- POP3、IMAP、Webmail、JMAP；
+- 明文 POP3、IMAP、Webmail、JMAP；
 - outbound SMTP、DKIM 签名、SMTP AUTH 或公网 submission 端口；
 - 服务器端全文索引（交给 notmuch）；
 - 数据库、消息去重、自动分类、入站内容反垃圾；
@@ -95,3 +97,5 @@ relay 凭据、不解析本地 submission，也不需要出站网络权限。随
 1. 收信域名与 MX/EHLO 主机名；
 2. catch-all 是否长期保留，还是以后只允许显式地址/带随机令牌的地址；
 3. Git 同步的拓扑（服务器 push、客户端 pull，或客户端经 SSH pull）以及邮件静态加密需求。
+
+POP3S 与可编程策略的拟议边界见 [policy-api.md](policy-api.md)，尚未实现。

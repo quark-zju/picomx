@@ -10,7 +10,8 @@
 - 发信由用户选择的 MUA、outbound MTA 或 SMTP relay 完成。
 
 当前仓库尚处于第一个可运行阶段。已经确定的范围和仍需选择的事项见
-[docs/design.md](docs/design.md)。
+[docs/design.md](docs/design.md)。拟议的 POP3S、身份授权与反垃圾接口见
+[docs/policy-api.md](docs/policy-api.md)。
 
 当前可运行范围是入站 SMTP 存档：
 
