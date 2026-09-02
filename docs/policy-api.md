@@ -5,26 +5,14 @@ POP3S 可见性规则，同时让协议实现继续负责状态机、错误码�
 
 ## 进程与权限边界
 
-建议最终生成两个二进制和两个 systemd service：
+picomx 以一个非 root 进程同时提供 SMTP/25 和 POP3S/995。两种协议共享归档和 TLS
+证书，分别限制连接数，并继续由 systemd 禁止主动 `connect(2)`。这意味着 SMTP 解析器、
+POP 解析器和 POP 凭据处于同一信任边界；对于单管理员、低流量服务，这一取舍优先保持
+代码和部署简单。
 
-```text
-picomx-smtpd  SMTP/25   写入存档   不读取 POP 凭据   禁止 connect(2)
-picomx-pop3d  POP3S/995 只读存档   读取密码摘要      禁止 connect(2)
-```
-
-两者使用不同 Unix 用户，通过只读组共享邮件文件。SMTP 创建的目录建议为 setgid
-`02750`、消息为 `0640`；POP service 再用 `ReadOnlyPaths=` 强制只读。POP 密码摘要只授予
-POP 用户读取。这样 POP 解析器漏洞不能修改归档，SMTP 解析器漏洞也拿不到登录凭据。
-
-自定义代码也分开放置：
-
-```text
-internal/smtpconfig/custom_local.go
-internal/pop3config/custom_local.go
-```
-
-对应包分别只被一个二进制 import，不依赖链接器碰巧删除另一侧秘密。没有自定义配置时
-两侧都 fail closed：SMTP 不接受域名，POP 不允许登录。
+可选 Go 配置只用于 SMTP 收件策略，放在被版本控制忽略的
+`internal/config/custom_local.go`，部署时与程序一起编译。POP 首版使用内置的单一随机
+app password 认证；环境配置缺失或不完整时认证全部失败。
 
 ## SMTP 策略
 

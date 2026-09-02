@@ -12,9 +12,9 @@ Webmail、日历、通讯录、邮件列表、多租户管理或与现有 MTA �
 ## 协议边界
 
 ```text
-Internet MTA --SMTP/25--> picomx-smtpd --> append-only archive --> git / notmuch
-                                           |
-MUA <--POP3S/995-- picomx-pop3d <-----------+
+Internet MTA --SMTP/25--+
+                         +--> picomx --> append-only archive --> git / notmuch
+MUA <--POP3S/995---------+
 
 MUA --> 独立 outbound MTA 或 SMTP relay --> Gmail 等收件方
 ```
@@ -23,9 +23,13 @@ MUA --> 独立 outbound MTA 或 SMTP relay --> Gmail 等收件方
 仍然必须使用 SMTP。Git 同步的是关闭连接后已经原子落盘的文件，不同步临时文件，也
 不承载投递协议。
 
-picomx 只监听公网 25 端口，不提供认证邮件提交，避免成为 open relay。出站服务与
-picomx 不共享代码、进程、队列或权限；即使出站工具配置错误，也不会扩大公网入站
-服务的协议面。
+picomx 监听 SMTP/25 和 POP3S/995，但不提供认证邮件提交，避免成为 open relay。出站
+服务与 picomx 不共享代码、进程、队列或权限；即使出站工具配置错误，也不会扩大公网
+入站服务的协议面。
+
+SMTP 和 POP3S 由同一个非 root 进程提供，共享归档和 TLS 证书。该选择接受 SMTP
+解析器与 POP 凭据位于同一信任边界，以换取更小的代码和部署面。两种协议分别限制
+连接数，避免 POP 登录攻击耗尽 SMTP 接收能力。进程仍禁止主动建立网络连接。
 
 ## 存储布局
 
