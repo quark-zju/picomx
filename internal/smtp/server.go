@@ -212,8 +212,16 @@ func (s *Server) serveConn(initialConn net.Conn) {
 				continue
 			}
 			address, params, err := parsePath(argument, "FROM:", true)
-			if err != nil || !validMailParameters(params, s.maxMessageSize) {
-				s.reply(conn, writer, 501, "5.5.2 invalid reverse-path or parameters")
+			if err != nil {
+				s.reply(conn, writer, 501, "5.5.2 invalid reverse-path")
+				continue
+			}
+			if err := validateMailParameters(params, s.maxMessageSize); err != nil {
+				if errors.Is(err, errMessageTooLarge) {
+					s.reply(conn, writer, 552, "5.3.4 message exceeds fixed maximum size")
+				} else {
+					s.reply(conn, writer, 501, "5.5.4 invalid MAIL parameters")
+				}
 				continue
 			}
 			tx = transaction{started: true, from: address}
@@ -444,21 +452,24 @@ func validAddress(address string) bool {
 	return true
 }
 
-func validMailParameters(parameters string, maxSize int64) bool {
+func validateMailParameters(parameters string, maxSize int64) error {
 	if parameters == "" {
-		return true
+		return nil
 	}
 	for _, parameter := range strings.Fields(parameters) {
 		name, value, found := strings.Cut(parameter, "=")
 		if !found || !strings.EqualFold(name, "SIZE") {
-			return false
+			return errors.New("unsupported MAIL parameter")
 		}
 		size, err := strconv.ParseInt(value, 10, 64)
-		if err != nil || size < 0 || size > maxSize {
-			return false
+		if err != nil || size < 0 {
+			return errors.New("invalid SIZE value")
+		}
+		if size > maxSize {
+			return errMessageTooLarge
 		}
 	}
-	return true
+	return nil
 }
 
 func validDomain(domain string) bool {

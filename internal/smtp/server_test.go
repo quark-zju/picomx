@@ -121,6 +121,29 @@ func TestServerRejectsOversizedStreamingMessage(t *testing.T) {
 	}
 }
 
+func TestServerRejectsDeclaredOversizedMessageAtMailCommand(t *testing.T) {
+	t.Parallel()
+
+	delivery := &memoryDelivery{}
+	client, responses := startTestSession(t, delivery, 5)
+	expectCode(t, responses, 220)
+	writeLine(t, client, "EHLO sender.example")
+	expectCode(t, responses, 250)
+	expectCode(t, responses, 250)
+	expectCode(t, responses, 250)
+	writeLine(t, client, "MAIL FROM:<sender@sender.example> SIZE=6")
+	if response := expectCode(t, responses, 552); !strings.Contains(response, "5.3.4") {
+		t.Fatalf("response = %q, want enhanced status 5.3.4", response)
+	}
+	writeLine(t, client, "QUIT")
+	expectCode(t, responses, 221)
+	_ = client.Close()
+
+	if got := len(delivery.all()); got != 0 {
+		t.Fatalf("delivered %d declared-oversized messages", got)
+	}
+}
+
 func TestServerRequiresMailBeforeRecipient(t *testing.T) {
 	t.Parallel()
 
