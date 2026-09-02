@@ -34,7 +34,19 @@ setup-user:
 install-config:
 	$(SUDO) install -d -m 755 $(CONFIG_DIR)
 	@if [ ! -f $(ENV_FILE) ]; then \
-		$(SUDO) install -m 600 $(ENV_EXAMPLE) $(ENV_FILE); \
+		if ! command -v openssl >/dev/null 2>&1; then \
+			echo "openssl is required to generate POP3 credentials" >&2; \
+			exit 1; \
+		fi; \
+		password=$$(openssl rand -hex 24); \
+		digest=$$(printf '%s' "$$password" | openssl dgst -sha256 -r | awk '{print $$1}'); \
+		tmp_env=$$(mktemp); \
+		trap 'rm -f "$$tmp_env"' 0 HUP INT TERM; \
+		cp $(ENV_EXAMPLE) "$$tmp_env"; \
+		printf '\nPICOMX_POP3_USERNAME=picomx\nPICOMX_POP3_PASSWORD_SHA256=%s\n' "$$digest" >>"$$tmp_env"; \
+		$(SUDO) install -m 600 "$$tmp_env" $(ENV_FILE); \
+		echo "generated POP3 username: picomx"; \
+		echo "generated POP3 app password (shown once): $$password"; \
 		echo "edit $(ENV_FILE) before starting picomx.socket"; \
 	fi
 	@if ! getent passwd $(SERVICE_USER) >/dev/null; then \
