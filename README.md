@@ -59,10 +59,88 @@ journalctl -u picomx.service -f
 ```
 
 `make deploy` 只安装程序、配置样例和 systemd unit，不会替你修改 DNS，也不会自动启动
-服务。启动前至少要把配置样例中的主机名、收件域和证书目录改成真实值，并配置域名的
-MX 记录。运行用户需要能读取证书私钥；若复用 picosrv 证书目录，可为 `picomx` 用户
-添加只读 ACL。邮件存档由 systemd 创建在
+服务。下面是一套可直接套用的公网配置（假设服务器公网 IPv4 为 `203.0.113.10`，
+收信域为 `example.net`，SMTP/POP3S 主机名为 `mx.example.net`）。
+
+### 1. 配置 DNS
+
+在 `example.net` 的 DNS 区域添加：
+
+```dns
+mx.example.net.  IN A   203.0.113.10
+example.net.     IN MX  10 mx.example.net.
+```
+
+如果服务器使用 IPv6，同时添加正确的 `AAAA` 记录；如果 IPv6 不可用，不要添加会把
+邮件引到错误地址的 `AAAA`。MX 的右侧必须是主机名，不能直接写 IP。DNS 生效后可用
+`dig +short MX example.net` 和 `dig +short A mx.example.net` 检查。
+
+`PICOMX_DOMAINS` 中写的是用户地址的域名（例如 `alice@example.net` 的
+`example.net`），`PICOMX_HOSTNAME` 写的是 SMTP 服务主机名（`mx.example.net`）。
+只有前者决定 picomx 接受哪些 RCPT TO 地址；后者用于 SMTP EHLO，也应当与 MX 指向的
+主机名一致。不要把 `mx.example.net` 填进 `PICOMX_DOMAINS`，除非你确实要接收该域名
+下的地址。
+
+### 2. 准备证书
+
+为 `mx.example.net` 申请一张包含该名字的证书（例如 ACME/Let's Encrypt），并确保
+证书和私钥最终能被 `picomx` 用户读取。证书目录按主机名组织，文件名固定为：
+
+```text
+/etc/picosrv/certs/mx.example.net/fullchain.pem
+/etc/picosrv/certs/mx.example.net/privkey.pem
+```
+
+也可以把证书放在父域目录（例如 `example.net/`）；picomx 会从精确主机名目录逐级
+向父域查找，但证书仍必须覆盖所有配置的 TLS 主机名。SMTP STARTTLS 和 POP3S/995
+共享这张证书。若 POP3S 使用另一个名字，例如 `pop.example.net`，DNS、证书和下面的
+`PICOMX_POP3_HOSTNAME`、`PICOMX_TLS_HOSTNAMES` 都必须一并加入。
+
+### 3. 填写运行配置
+
+编辑 `make deploy` 安装的 `/etc/picomx/picomx.env`：
+
+```ini
+PICOMX_HOSTNAME=mx.example.net
+PICOMX_DOMAINS=example.net
+PICOMX_ARCHIVE_ROOT=/var/lib/picomx/messages
+PICOMX_CERT_DIR=/etc/picosrv/certs
+PICOMX_POP3_HOSTNAME=mx.example.net
+PICOMX_TLS_HOSTNAMES=mx.example.net
+```
+
+`make deploy` 首次部署时会显示一次 POP3 app password，并把用户名和密码摘要写入
+配置；请立即保存密码。运行用户需要能读取证书私钥；若复用 picosrv 证书目录，可为
+`picomx` 用户添加只读 ACL。邮件存档由 systemd 创建在
 `/var/lib/picomx/messages`，权限默认为仅 `picomx` 用户可访问。
+
+### 4. 放通端口并启动
+
+在云防火墙和主机防火墙中只放通 TCP/25（其他邮件服务器投递）和 TCP/995（自己的
+POP3S 客户端）；不要放通未使用的明文 POP3/110、IMAP 或 submission 端口。然后启动：
+
+```sh
+sudo systemctl enable --now picomx.socket
+sudo systemctl status picomx.socket picomx.service
+sudo journalctl -u picomx.service -f
+```
+
+### 5. 验证收信和取信
+
+先确认端口和 TLS：
+
+```sh
+openssl s_client -connect mx.example.net:995 -servername mx.example.net
+openssl s_client -starttls smtp -connect mx.example.net:25 -servername mx.example.net
+```
+
+向 `anything@example.net` 发一封测试邮件；日志中应看到 SMTP 接受并发布消息。POP
+客户端应设置为：服务器 `mx.example.net`、端口 `995`、SSL/TLS 为“连接时启用”（隐式
+TLS），用户名和部署时生成的 app password；不要选择明文 POP3 或 STLS。客户端必须
+启用“在服务器保留邮件”，因为 picomx 是只读归档，`DELE` 会明确失败。
+
+如果证书、端口或收件域不匹配，优先依次检查 `dig` 结果、云/主机防火墙、
+`systemctl status` 和 `journalctl`；修改证书后服务会自动热加载，无需重启。
 
 重复 POP 认证失败的可选封禁规则通过 `make deploy-fail2ban` 安装。POP 客户端必须启用
 “在服务器保留邮件”；`DELE` 会明确失败。
