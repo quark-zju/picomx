@@ -58,6 +58,19 @@ sudo systemctl enable --now picomx.socket
 journalctl -u picomx.service -f
 ```
 
+如果本机无法使用 TCP/25，可以为 `picomx.socket` 创建本地 systemd override，例如将 SMTP
+改为 2525（POP3S 仍为 995）：
+
+```sh
+make override-systemd SMTP_PORT=2525
+sudo systemctl restart picomx.socket
+```
+
+该规则会生成并打开编辑 `/etc/systemd/system/picomx.socket.d/override.conf`。其中空的
+`ListenStream=` 用于清除原 unit 的监听列表，请保留。改用非标准 SMTP 端口后，公网其他
+邮件服务器通常仍无法直接向本机投递；如果 25 端口不可用，可考虑使用外部邮件服务（例如
+purelymail）作为 relay，并让 picomx 在可用的非标准端口接收本地流量。
+
 `make deploy` 只安装程序、配置样例和 systemd unit，不会替你修改 DNS，也不会自动启动
 服务。下面是一套可直接套用的公网配置（假设服务器公网 IPv4 为 `203.0.113.10`，
 收信域为 `example.net`，SMTP/POP3S 主机名为 `mx.example.net`）。

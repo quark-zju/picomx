@@ -5,6 +5,8 @@ BUILD_TARGET := ./cmd/picomxd
 PREFIX ?= /usr/local/bin
 INSTALL_PATH := $(PREFIX)/$(BINARY)
 SYSTEMD_DIR ?= /etc/systemd/system
+SYSTEMD_OVERRIDE_DIR ?= $(SYSTEMD_DIR)/picomx.socket.d
+SYSTEMD_OVERRIDE_FILE ?= $(SYSTEMD_OVERRIDE_DIR)/override.conf
 CONFIG_DIR ?= /etc/picomx
 ENV_FILE ?= $(CONFIG_DIR)/picomx.env
 ENV_EXAMPLE := examples/picomx.env.example
@@ -17,7 +19,7 @@ FAIL2BAN_JAIL_DIR ?= /etc/fail2ban/jail.d
 CERT_DIR ?= /etc/picosrv/certs
 SUDO ?= sudo
 
-.PHONY: build test fmt config install setup-user install-config install-systemd install-fail2ban facl deploy deploy-fail2ban
+.PHONY: build test fmt config install setup-user install-config install-systemd override-systemd install-fail2ban facl deploy deploy-fail2ban
 
 build:
 	go build -o $(BINARY) $(BUILD_TARGET)
@@ -68,6 +70,24 @@ install-systemd:
 	$(SUDO) install -m 644 deploy/systemd/picomx.service $(SYSTEMD_DIR)/picomx.service
 	$(SUDO) install -m 644 deploy/systemd/picomx.socket $(SYSTEMD_DIR)/picomx.socket
 	$(SUDO) systemctl daemon-reload
+
+override-systemd:
+	@if [ -z "$(SMTP_PORT)" ]; then \
+		echo "usage: make override-systemd SMTP_PORT=2525 [POP3_PORT=995]" >&2; \
+		exit 2; \
+	fi
+	$(SUDO) install -d -m 755 $(SYSTEMD_OVERRIDE_DIR)
+	tmp_override=$$(mktemp); \
+	trap 'rm -f "$$tmp_override"' 0 HUP INT TERM; \
+	{ \
+		echo '[Socket]'; \
+		echo 'ListenStream='; \
+		echo 'ListenStream=$(SMTP_PORT)'; \
+		echo 'ListenStream=$(or $(POP3_PORT),995)'; \
+	} >"$$tmp_override"; \
+	$(SUDO) install -m 644 "$$tmp_override" $(SYSTEMD_OVERRIDE_FILE); \
+	$(SUDO) systemctl daemon-reload; \
+	$(SUDO)edit $(SYSTEMD_OVERRIDE_FILE)
 
 install-fail2ban:
 	@if ! command -v fail2ban-client >/dev/null 2>&1; then \
