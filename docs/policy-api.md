@@ -78,89 +78,28 @@ envelope recipients、接收时间、字节数和内部 message ID。不要把�
 `connect(2)`；DNSBL、HTTP API 或复杂扫描器若将来需要，应作为显式 sidecar 设计，而不是
 悄悄扩大 SMTP 进程权限。
 
-## POP3S 身份与可见性
+## POP3S 身份
 
-POP3S 使用 995 端口 implicit TLS，不提供明文 POP3 或 STLS。认证成功后返回一个稳定的
-identity 和一个只负责授权的 mailbox view：
+POP3S 使用 995 端口 implicit TLS，不提供明文 POP3 或 STLS。首版只有一个 mailbox，
+所有成功认证的客户端看见整个 archive，不提供 Go 认证 policy 或逐地址授权。
 
-```go
-type POP3Policy interface {
-    Authenticate(AuthRequest) AuthDecision
-}
-
-type AuthRequest struct {
-    Username   string
-    Password   PasswordCheck
-    RemoteIP   netip.Addr
-    TLSVersion uint16
-}
-
-type PasswordCheck interface {
-    // 比较服务端计算的 SHA-256 与配置中的摘要，全程 constant-time。
-    // 只适用于至少 128 bit 的随机 app password，不适用于人类短密码。
-    MatchesSHA256(expected [32]byte) bool
-}
-
-type AuthAction int
-const (
-    AuthDeny AuthAction = iota
-    AuthAllow
-    AuthTempFail
-)
-
-type AuthDecision struct {
-    Action   AuthAction
-    Identity string
-    View     MailboxView // 仅 AuthAllow 时使用
-    Reason   string
-}
-
-type MailboxView interface {
-    Allows(MessageMetadata) bool
-}
-```
-
-配置代码看不到可打印、可记录的原始密码，只能要求框架做一种受支持的安全比较。轻量
-首版建议生成高熵 app password，并在配置中保存 SHA-256 摘要；若必须支持人类密码，另加
-Argon2id PHC verifier，并接受 `golang.org/x/crypto` 这一项经过审计的依赖，不自行实现
-密码 KDF。
-
-`MailboxView` 通常按 envelope recipient 判断，而不是按可伪造的原始 `To`/`Cc` 头判断：
-
-```go
-type myView struct{}
-
-func (myView) Allows(m MessageMetadata) bool {
-    return slices.ContainsFunc(m.Recipients, func(a Address) bool {
-        return a.Domain == "example.net" &&
-            (a.Local == "me" || strings.HasPrefix(a.Local, "shop-"))
-    })
-}
-```
-
-一封信有多个 envelope recipients 时，只要其中一个地址被 view 允许就可见。身份验证和
-逐封授权分开，使一个身份可看多个地址、多个身份也可看同一封邮件，而不复制 `.eml`。
+部署生成至少 128 bit 的随机 app password，配置只保存用户名和 SHA-256 摘要。框架同时
+hash 用户名和密码并 constant-time 比较；环境配置缺失或不完整时全部认证失败。USER
+响应不泄漏用户名是否存在；每次失败 PASS 产生 fail2ban 可匹配的结构化日志。
 
 ## POP3 的 append-only 语义
 
-- 认证成功时取得不可变快照；本次连接内 message number 不变化，新邮件下次连接可见；
-- `UIDL` 使用不可变相对路径的 SHA-256（64 个十六进制字符），跨会话稳定且不泄漏路径；
+- 认证成功只取得 `{last ID, total octets}` 快照，不扫描或复制邮件元数据；
+- archive ID 直接作为稳定的 message number，UIDL 使用其可打印编码；
 - 实现 `CAPA`、`USER`、`PASS`、`STAT`、`LIST`、`UIDL`、`RETR`、`TOP`、`NOOP`、`RSET`、
   `QUIT`；
 - `DELE` 始终返回 `-ERR archive is read-only`，`RSET` 因而是无操作；
 - 客户端必须配置为“在服务器保留邮件”；
 - 不保存已读、下载时间或每客户端游标，所有同步状态留给客户端；
-- archive 中的消息在写入时规范化为 CRLF，POP 的 `LIST` octet count 与 `RETR` 一致。
-
-POP 进程启动时扫描不可变年月目录，只从文件开头由 picomx 生成、位于本机 `Received`
-头之前的 `Delivered-To` 块重建内存元数据，忽略原始邮件中可能伪造的同名头。之后只重扫
-目录 mtime 变化的月份并解析新文件，不引入数据库或可变服务端索引。每个会话在认证完成
-时复制符合 `MailboxView` 的轻量元数据切片，打开邮件时再次验证路径仍位于 archive root
-且是 regular file。
+- archive 中的消息在写入时规范化为 CRLF，POP 的 `LIST` octet count 与 `RETR` 一致；
+- `STAT`、带参数的 `LIST`/`UIDL` 和单封读取均为常数或有界目录访问；只有客户端明确
+  请求不带参数的 `LIST`/`UIDL` 时才遍历或生成全部邮件项。
 
 ## 待确认项
 
-1. 是否接受 POP3S 永久 read-only，`DELE` 总是失败；
-2. 是否只支持随机 app password，还是首版就引入 Argon2id 支持人类密码；
-3. anti-spam 首版是否只需 accept/reject/tempfail，还是必须有 append-only quarantine；
-4. 地址授权是否始终以 SMTP envelope recipient 为准。
+1. anti-spam 首版是否只需 accept/reject/tempfail，还是必须有 append-only quarantine。
