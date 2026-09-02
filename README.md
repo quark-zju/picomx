@@ -112,8 +112,9 @@ PICOMX_TLS_HOSTNAMES=mx.example.net
 ```
 
 `make deploy` 首次部署时会显示一次 POP3 app password，并把用户名和密码摘要写入
-配置；请立即保存密码。运行用户需要能读取证书私钥；若复用 picosrv 证书目录，可为
-`picomx` 用户添加只读 ACL。邮件存档由 systemd 创建在
+配置；请立即保存密码。运行用户需要能读取证书私钥；若复用 picosrv 证书目录，部署后运行
+`make facl` 为 `picomx` 用户添加只读 ACL（可用 `CERT_DIR=/path/to/certs make facl`
+覆盖证书目录）。邮件存档由 systemd 创建在
 `/var/lib/picomx/messages`，权限默认为仅 `picomx` 用户可访问。
 
 ### 4. 放通端口并启动
