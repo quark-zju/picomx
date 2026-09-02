@@ -5,23 +5,26 @@
 picomx 服务一个管理员、少量域名和低邮件量。它偏向“可审计的小组件”，不追求
 Webmail、日历、通讯录、邮件列表、多租户管理或与现有 MTA 的插件兼容性。
 
-典型地址为 `shop-name@example.net`。首版对配置域名采用 catch-all：合法 local-part
-都可收件，但不会把 local-part 当文件路径。这样不需要为每个购物网站预先创建账户，
-泄漏后也容易根据 `To` / `Delivered-To` 定位来源。
+典型地址为 `shop-name@example.net`。默认采用“全收地址”（catch-all）模式：
+只要 `@` 后的域名在配置中，`@` 前的地址部分（邮件术语为 local-part）
+可以是任意合法字符串。例如配置 `example.net` 后，
+`shop-name@example.net` 和 `random-token@example.net` 都会收件。picomx 不会把
+这部分当作文件路径。这样不需要为每个网站预先创建账户，地址泄漏后也容易
+根据 `To` / `Delivered-To` 定位来源。
 
 ## 协议边界
 
 ```text
 Internet MTA --SMTP/25--+
-                         +--> picomx --> append-only archive --> git / notmuch
+                         +--> picomx --> append-only archive --> optional backup / notmuch
 MUA <--POP3S/995---------+
 
 MUA --> 独立 outbound MTA 或 SMTP relay --> Gmail 等收件方
 ```
 
 “不用 POP3/IMAP”只适用于用户设备与邮件库之间的同步。公网邮件服务器之间收发邮件
-仍然必须使用 SMTP。Git 同步的是关闭连接后已经原子落盘的文件，不同步临时文件，也
-不承载投递协议。
+仍然必须使用 SMTP。POP3S 是用户访问存档的协议；如果管理员另行使用 Git 备份，
+它只同步关闭 SMTP 连接后已经原子落盘的文件，不同步临时文件，也不承载投递协议。
 
 picomx 监听 SMTP/25 和 POP3S/995，但不提供认证邮件提交，避免成为 open relay。出站
 服务与 picomx 不共享代码、进程、队列或权限；即使出站工具配置错误，也不会扩大公网
@@ -70,9 +73,10 @@ messages/
 发布与 state 更新之间时，启动只检查确定的下一个路径并恢复尾部，不扫描整个存档。
 
 notmuch 可以递归索引任意“一封邮件一个文件”的树，不要求 Maildir；只是这种布局不能
-把 notmuch tags 同步为文件名 flags，符合存档不可变的目标。Git 仓库提交已发布的 ID
-目录和 state；`.gitignore` 忽略 `tmp/`，避免同步半封邮件。notmuch 数据库不应提交：
-它可重建、经常变化，并包含可还原的邮件内容。
+把 notmuch tags 同步为文件名 flags，符合存档不可变的目标。如果管理员另行使用
+Git 备份，只应提交已发布的 ID 目录和 state；`.gitignore` 忽略 `tmp/`，
+避免同步半封邮件。notmuch 数据库不应提交：它可重建、经常变化，并包含可还原的
+邮件内容。picomx 本身不运行 Git，POP3S 是当前的邮件访问方式。
 
 ## 入站 SMTP 的首版约束
 
@@ -85,8 +89,8 @@ notmuch 可以递归索引任意“一封邮件一个文件”的树，不要求
 - JSON 结构化日志只记录 envelope、大小、远端地址和结果，不记录正文；
 - 由 systemd socket activation 持有 25 和 995 端口，服务进程不使用 root。
 
-catch-all 会增加垃圾邮件与磁盘耗尽风险。“暂不做收信反垃圾”不应取消资源限制；首版
-仍需拒绝未知域、过大邮件、过多收件人和超时连接。后续可以增加地址令牌或显式地址表，
+全收地址模式会增加垃圾邮件与磁盘耗尽风险。“暂不做收信反垃圾”不应取消资源限制；
+首版仍需拒绝未知域、过大邮件、过多收件人和超时连接。后续可以增加地址令牌或显式地址表，
 而不改变磁盘格式。
 
 ## 外部发信边界
@@ -115,12 +119,21 @@ relay 凭据、不解析本地 submission，也不需要出站网络权限。随
 - 数据库、消息去重、自动分类、入站内容反垃圾；
 - 任意转发规则和多租户管理面。
 
-## 尚需管理员选择
+## 部署时配置
 
-以下信息不阻塞入站核心和存储实现，但会阻塞真正公网部署：
+1. 在 `PICOMX_DOMAINS` 中设置收信域名，例如 `example.net`。它决定 picomx
+   允许哪些 `@` 后缀，不是服务器主机名。
+2. 为收信域名设置 MX 记录，使它指向 SMTP 服务器主机名，例如
+   `example.net MX 10 mx.example.net`；同时将 `PICOMX_HOSTNAME` 设为
+   `mx.example.net`，用于 SMTP EHLO 和投递头。两个名字相关，但用途不同。
+3. 设置 POP 客户端连接的主机名、共享证书目录和证书需要覆盖的名字。
+   POP 主机名可以与 SMTP 主机名相同，也可以分开。
+4. 默认接收配置域名下的任意地址。如果只想允许某些 `@` 前缀，或只允许
+   符合自定义规则的地址，运行 `make config` 并实现本地收件人策略
+   （SMTP recipient policy）。`PICOMX_DOMAINS` 仍是最外层边界：自定义规则不能接收
+   配置以外的域名。
 
-1. 收信域名与 MX/EHLO 主机名；
-2. catch-all 是否长期保留，还是以后只允许显式地址/带随机令牌的地址；
-3. 是否额外使用 Git 同步归档，以及邮件静态加密需求。
+Git 归档不是 picomx 的部署要求；如有需要，可以在服务之外对已发布文件做备份。
+邮件静态加密不在当前设计范围内。
 
 POP3S 与可编程策略的边界见 [policy-api.md](policy-api.md)。
