@@ -1,4 +1,5 @@
 /picomxd
+/.gocache/
 messages/tmp/*
 .notmuch/
 .notmuch-config
