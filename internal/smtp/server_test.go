@@ -10,11 +10,25 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"picomx/internal/config"
 )
 
 type memoryDelivery struct {
 	mu       sync.Mutex
 	messages [][]byte
+}
+
+type testPolicy struct {
+	recipient func(config.RecipientRequest) config.RecipientDecision
+}
+
+func (p testPolicy) EvaluateRecipient(request config.RecipientRequest) config.RecipientDecision {
+	return p.recipient(request)
+}
+
+func (testPolicy) EvaluateMessage(config.MessageRequest) config.MessageDecision {
+	return config.MessageDecision{Action: config.MessageAccept}
 }
 
 func (d *memoryDelivery) Deliver(message io.Reader) (string, error) {
@@ -192,7 +206,44 @@ func TestServerRequiresMailBeforeRecipient(t *testing.T) {
 	_ = client.Close()
 }
 
+func TestServerAppliesRecipientPolicyAfterDomainBoundary(t *testing.T) {
+	t.Parallel()
+
+	delivery := &memoryDelivery{}
+	requests := make(chan config.RecipientRequest, 2)
+	policy := testPolicy{recipient: func(request config.RecipientRequest) config.RecipientDecision {
+		requests <- request
+		if request.Recipient.Local == "blocked" && request.Recipient.Domain == "mail.example" {
+			return config.RecipientDecision{Action: config.RecipientRejectPolicy, Reason: "blocked_local_part"}
+		}
+		return config.RecipientDecision{Action: config.RecipientAccept}
+	}}
+	client, responses := startTestSessionWithPolicy(t, delivery, 1024, policy)
+	expectCode(t, responses, 220)
+	writeLine(t, client, "HELO sender.example")
+	expectCode(t, responses, 250)
+	writeLine(t, client, "MAIL FROM:<sender@sender.example>")
+	expectCode(t, responses, 250)
+	writeLine(t, client, "RCPT TO:<blocked@mail.example>")
+	expectCode(t, responses, 550)
+	writeLine(t, client, "RCPT TO:<allowed@mail.example>")
+	expectCode(t, responses, 250)
+	for index := 0; index < 2; index++ {
+		request := <-requests
+		if request.EnvelopeFrom.String() != "sender@sender.example" {
+			t.Fatalf("envelope from = %q", request.EnvelopeFrom.String())
+		}
+		if request.Recipient.Domain != "mail.example" {
+			t.Fatalf("recipient = %+v", request.Recipient)
+		}
+	}
+}
+
 func startTestSession(t *testing.T, delivery Delivery, maxSize int64) (net.Conn, *bufio.Reader) {
+	return startTestSessionWithPolicy(t, delivery, maxSize, nil)
+}
+
+func startTestSessionWithPolicy(t *testing.T, delivery Delivery, maxSize int64, policy config.SMTPPolicy) (net.Conn, *bufio.Reader) {
 	t.Helper()
 	server, err := NewServer(Options{
 		Hostname:       "mx.mail.example",
@@ -200,6 +251,7 @@ func startTestSession(t *testing.T, delivery Delivery, maxSize int64) (net.Conn,
 		Delivery:       delivery,
 		MaxMessageSize: maxSize,
 		IdleTimeout:    5 * time.Second,
+		Policy:         policy,
 	})
 	if err != nil {
 		t.Fatal(err)

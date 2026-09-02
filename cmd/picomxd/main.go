@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"picomx/internal/archive"
+	"picomx/internal/config"
 	"picomx/internal/pop3"
 	"picomx/internal/smtp"
 	"picomx/internal/systemd"
@@ -101,6 +102,7 @@ func main() {
 		MaxConnections: maxConnections,
 		IdleTimeout:    idleTimeout,
 		Logger:         logger,
+		Policy:         config.NewSMTPPolicy(),
 	})
 	exitOnError(logger, "configure SMTP server", err)
 	credentials, err := pop3.NewCredentials(*pop3Username, *pop3PasswordHash)

@@ -11,10 +11,13 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"picomx/internal/config"
 )
 
 const (
@@ -47,6 +50,7 @@ type Options struct {
 	MaxConnections int
 	IdleTimeout    time.Duration
 	Logger         *slog.Logger
+	Policy         config.SMTPPolicy
 }
 
 // Server accepts SMTP connections and delivers only to configured domains.
@@ -59,6 +63,7 @@ type Server struct {
 	maxRecipients  int
 	idleTimeout    time.Duration
 	logger         *slog.Logger
+	policy         config.SMTPPolicy
 	connections    chan struct{}
 	wg             sync.WaitGroup
 }
@@ -99,6 +104,9 @@ func NewServer(options Options) (*Server, error) {
 	if options.Logger == nil {
 		options.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
+	if options.Policy == nil {
+		options.Policy = config.NewSMTPPolicy()
+	}
 	return &Server{
 		hostname:       hostname,
 		domains:        domains,
@@ -108,6 +116,7 @@ func NewServer(options Options) (*Server, error) {
 		maxRecipients:  options.MaxRecipients,
 		idleTimeout:    options.IdleTimeout,
 		logger:         options.Logger,
+		policy:         options.Policy,
 		connections:    make(chan struct{}, options.MaxConnections),
 	}, nil
 }
@@ -245,6 +254,26 @@ func (s *Server) serveConn(initialConn net.Conn) {
 				s.reply(conn, writer, 452, "4.5.3 too many recipients")
 				continue
 			}
+			decision := s.evaluateRecipient(config.RecipientRequest{
+				Connection:   connectionInfo(remote, helo, encrypted),
+				EnvelopeFrom: envelopeAddress(tx.from),
+				Recipient:    envelopeAddress(address),
+			})
+			switch decision.Action {
+			case config.RecipientAccept:
+			case config.RecipientRejectUnknown:
+				s.logRecipientDecision(remote, address, decision)
+				s.reply(conn, writer, 550, "5.1.1 recipient unknown")
+				continue
+			case config.RecipientTempFail:
+				s.logRecipientDecision(remote, address, decision)
+				s.reply(conn, writer, 451, "4.7.1 recipient temporarily rejected")
+				continue
+			default:
+				s.logRecipientDecision(remote, address, decision)
+				s.reply(conn, writer, 550, "5.7.1 recipient rejected by policy")
+				continue
+			}
 			tx.recipients = append(tx.recipients, address)
 			s.reply(conn, writer, 250, "2.1.5 recipient accepted")
 		case "DATA":
@@ -292,6 +321,45 @@ func (s *Server) serveConn(initialConn net.Conn) {
 			s.reply(conn, writer, 502, "5.5.1 command not implemented")
 		}
 	}
+}
+
+func (s *Server) evaluateRecipient(request config.RecipientRequest) (decision config.RecipientDecision) {
+	defer func() {
+		if recover() != nil {
+			decision = config.RecipientDecision{Action: config.RecipientTempFail, Reason: "policy_panic"}
+		}
+	}()
+	return s.policy.EvaluateRecipient(request)
+}
+
+func (s *Server) logRecipientDecision(remote, recipient string, decision config.RecipientDecision) {
+	s.logger.Info("SMTP recipient policy decision",
+		"remote_ip", remote,
+		"recipient", recipient,
+		"policy_action", decision.Action,
+		"policy_reason", truncateReason(decision.Reason),
+	)
+}
+
+func connectionInfo(remote, helo string, encrypted bool) config.ConnectionInfo {
+	address, _ := netip.ParseAddr(remote)
+	return config.ConnectionInfo{RemoteIP: address, HELO: helo, TLS: encrypted}
+}
+
+func envelopeAddress(address string) config.Address {
+	if address == "" {
+		return config.Address{}
+	}
+	local, domain, _ := strings.Cut(address, "@")
+	return config.Address{Local: local, Domain: normalizeDomain(domain)}
+}
+
+func truncateReason(reason string) string {
+	const limit = 128
+	if len(reason) <= limit {
+		return reason
+	}
+	return reason[:limit]
 }
 
 func (s *Server) deliveryHeaders(remote, helo string, encrypted bool, tx transaction) string {
