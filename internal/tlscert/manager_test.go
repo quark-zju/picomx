@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestManagerReloadsChangedCertificate(t *testing.T) {
@@ -39,6 +40,55 @@ func TestManagerReloadsChangedCertificate(t *testing.T) {
 	}
 	if bytes.Equal(beforeDER, after.Certificate[0]) {
 		t.Fatal("certificate bytes did not change")
+	}
+}
+
+func TestExpirationLevel(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1000, 0)
+	tests := []struct {
+		remaining time.Duration
+		want      string
+	}{
+		{remaining: -time.Second, want: "expired"},
+		{remaining: time.Hour, want: "1d"},
+		{remaining: 3 * 24 * time.Hour, want: "7d"},
+		{remaining: 20 * 24 * time.Hour, want: "30d"},
+		{remaining: 31 * 24 * time.Hour, want: ""},
+	}
+	for _, test := range tests {
+		if got := expirationLevel(now.Add(test.remaining), now); got != test.want {
+			t.Errorf("expirationLevel(%v) = %q, want %q", test.remaining, got, test.want)
+		}
+	}
+}
+
+func TestManagerRejectsExpiredReplacement(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	directory := filepath.Join(root, "example.com")
+	writeTestCertificate(t, directory, []string{"*.example.com"})
+	manager, err := New(root, []string{"mx.example.com"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := manager.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	writeTestCertificateAt(t, directory, []string{"*.example.com"}, now.Add(-2*time.Hour), now.Add(-time.Hour))
+	if changed, err := manager.Reload(); err == nil || changed {
+		t.Fatalf("Reload() = %v, %v, want unchanged expiration error", changed, err)
+	}
+	after, err := manager.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatal("expired replacement replaced current certificate")
 	}
 }
 

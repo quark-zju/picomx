@@ -57,6 +57,12 @@ func TestDomainCandidates(t *testing.T) {
 
 func writeTestCertificate(t *testing.T, directory string, dnsNames []string) {
 	t.Helper()
+	now := time.Now()
+	writeTestCertificateAt(t, directory, dnsNames, now.Add(-time.Hour), now.Add(time.Hour))
+}
+
+func writeTestCertificateAt(t *testing.T, directory string, dnsNames []string, notBefore, notAfter time.Time) {
+	t.Helper()
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -64,13 +70,12 @@ func writeTestCertificate(t *testing.T, directory string, dnsNames []string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now()
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: dnsNames[0]},
 		DNSNames:     dnsNames,
-		NotBefore:    now.Add(-time.Hour),
-		NotAfter:     now.Add(time.Hour),
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}

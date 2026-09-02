@@ -13,11 +13,14 @@ import (
 
 // Manager owns the one certificate shared by SMTP STARTTLS and POP3S.
 type Manager struct {
-	certDir   string
-	hostnames []string
-	logger    *slog.Logger
-	reloadMu  sync.Mutex
-	current   atomic.Pointer[loadedCertificate]
+	certDir     string
+	hostnames   []string
+	logger      *slog.Logger
+	now         func() time.Time
+	reloadMu    sync.Mutex
+	warningMu   sync.Mutex
+	lastWarning string
+	current     atomic.Pointer[loadedCertificate]
 }
 
 // New loads and validates the initial fixed certificate.
@@ -33,8 +36,9 @@ func New(certDir string, hostnames []string, logger *slog.Logger) (*Manager, err
 	if err != nil {
 		return nil, err
 	}
-	manager := &Manager{certDir: certDir, hostnames: names, logger: logger}
+	manager := &Manager{certDir: certDir, hostnames: names, logger: logger, now: time.Now}
 	manager.current.Store(&loaded)
+	manager.reportExpiration()
 	return manager, nil
 }
 
@@ -68,8 +72,15 @@ func (m *Manager) Reload() (bool, error) {
 	if current != nil && current.hash == next.hash && current.directory == next.directory {
 		return false, nil
 	}
+	if now := m.now(); now.Before(next.leaf.NotBefore) || !now.Before(next.leaf.NotAfter) {
+		return false, errors.New("replacement TLS certificate is not currently valid")
+	}
 	m.current.Store(&next)
+	m.warningMu.Lock()
+	m.lastWarning = ""
+	m.warningMu.Unlock()
 	m.logger.Info("TLS certificate reloaded", "directory", next.directory)
+	m.reportExpiration()
 	return true, nil
 }
 
@@ -88,6 +99,48 @@ func (m *Manager) RunReloadLoop(ctx context.Context, interval time.Duration) {
 			if _, err := m.Reload(); err != nil {
 				m.logger.Error("reload TLS certificate", "error", err)
 			}
+			m.reportExpiration()
 		}
+	}
+}
+
+func (m *Manager) reportExpiration() {
+	loaded := m.current.Load()
+	if loaded == nil || loaded.leaf == nil {
+		return
+	}
+	level := expirationLevel(loaded.leaf.NotAfter, m.now())
+	if level == "" {
+		return
+	}
+	key := loaded.leaf.NotAfter.UTC().Format(time.RFC3339Nano) + ":" + level
+	m.warningMu.Lock()
+	if m.lastWarning == key {
+		m.warningMu.Unlock()
+		return
+	}
+	m.lastWarning = key
+	m.warningMu.Unlock()
+	attributes := []any{"not_after", loaded.leaf.NotAfter.UTC(), "threshold", level}
+	if level == "expired" {
+		m.logger.Error("TLS certificate expired", attributes...)
+		return
+	}
+	m.logger.Warn("TLS certificate expires soon", attributes...)
+}
+
+func expirationLevel(notAfter, now time.Time) string {
+	remaining := notAfter.Sub(now)
+	switch {
+	case remaining <= 0:
+		return "expired"
+	case remaining <= 24*time.Hour:
+		return "1d"
+	case remaining <= 7*24*time.Hour:
+		return "7d"
+	case remaining <= 30*24*time.Hour:
+		return "30d"
+	default:
+		return ""
 	}
 }
