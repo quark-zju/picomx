@@ -5,116 +5,105 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
-	"time"
+	"sync"
 )
 
-// Store writes immutable messages beneath Root/YYYY/MM/.
+// Store writes immutable messages under deterministic, sequential ID paths.
 type Store struct {
-	root     string
-	hostname string
-	now      func() time.Time
-	sequence atomic.Uint64
+	root  string
+	mu    sync.Mutex
+	state mailboxState
 }
 
-// New returns an archive rooted at root. Directories are created lazily.
+// New opens the single-writer archive rooted at root.
 func New(root string) (*Store, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("message archive root is required")
 	}
-	hostname, err := os.Hostname()
+	state, err := readMailboxState(root)
 	if err != nil {
-		return nil, fmt.Errorf("get hostname: %w", err)
+		return nil, err
 	}
-	return newStore(root, hostname, time.Now), nil
-}
-
-func newStore(root, hostname string, now func() time.Time) *Store {
-	return &Store{
-		root:     root,
-		hostname: safeHostname(hostname),
-		now:      now,
-	}
+	return &Store{root: root, state: state}, nil
 }
 
 // Deliver durably publishes one immutable message and returns its final path.
 // It never overwrites an existing archive file.
 func (s *Store) Deliver(message io.Reader) (finalPath string, err error) {
-	now := s.now().UTC()
-	monthDir := filepath.Join(s.root, now.Format("2006"), now.Format("01"))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.state.LastID == math.MaxUint64 {
+		return "", errors.New("message ID space exhausted")
+	}
+	nextID := s.state.LastID + 1
+	relativePath, err := messageRelativePath(nextID)
+	if err != nil {
+		return "", err
+	}
+	finalPath = filepath.Join(s.root, relativePath)
+	finalDir := filepath.Dir(finalPath)
 	tmpDir := filepath.Join(s.root, "tmp")
-	for _, dir := range []string{monthDir, tmpDir} {
+	for _, dir := range []string{finalDir, tmpDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return "", fmt.Errorf("create archive directory: %w", err)
 		}
 	}
 
-	filename := fmt.Sprintf(
-		"%d.%d_%d.%s.eml",
-		now.UnixNano(),
-		os.Getpid(),
-		s.sequence.Add(1),
-		s.hostname,
-	)
-	tmpPath := filepath.Join(tmpDir, filename)
-	finalPath = filepath.Join(monthDir, filename)
-
-	file, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := os.CreateTemp(tmpDir, ".message-*")
 	if err != nil {
 		return "", fmt.Errorf("create temporary message: %w", err)
 	}
+	tmpPath := file.Name()
 	defer func() {
 		_ = file.Close()
 		_ = os.Remove(tmpPath)
 	}()
 
-	if _, err = io.Copy(file, message); err != nil {
+	written, err := io.Copy(file, message)
+	if err != nil {
 		return "", fmt.Errorf("write message: %w", err)
 	}
-	if err = file.Sync(); err != nil {
+	if uint64(written) > math.MaxUint64-s.state.TotalOctets {
+		return "", errors.New("mailbox octet count overflow")
+	}
+	if err := file.Sync(); err != nil {
 		return "", fmt.Errorf("sync message: %w", err)
 	}
-	if err = file.Close(); err != nil {
+	if err := file.Close(); err != nil {
 		return "", fmt.Errorf("close message: %w", err)
 	}
-	// Link, unlike Rename, fails if finalPath already exists. Both directories
-	// live under the same archive root and therefore on the same filesystem.
-	if err = os.Link(tmpPath, finalPath); err != nil {
+	if err := os.Link(tmpPath, finalPath); err != nil {
 		return "", fmt.Errorf("publish message without overwrite: %w", err)
 	}
+	if err := syncDirectory(finalDir); err != nil {
+		return "", err
+	}
 
-	finalDir, openErr := os.Open(monthDir)
-	if openErr != nil {
-		return "", fmt.Errorf("open archive for sync: %w", openErr)
+	nextState := mailboxState{
+		Version:     mailboxStateVersion,
+		LastID:      nextID,
+		TotalOctets: s.state.TotalOctets + uint64(written),
 	}
-	defer finalDir.Close()
-	if err = finalDir.Sync(); err != nil {
-		return "", fmt.Errorf("sync archive: %w", err)
+	if err := writeMailboxState(s.root, nextState); err != nil {
+		return "", err
 	}
+	s.state = nextState
 	return finalPath, nil
 }
 
-func safeHostname(hostname string) string {
-	if hostname == "" {
-		return "localhost"
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open archive directory for sync: %w", err)
 	}
-	var b strings.Builder
-	for _, char := range hostname {
-		switch {
-		case char >= 'a' && char <= 'z':
-			b.WriteRune(char)
-		case char >= 'A' && char <= 'Z':
-			b.WriteRune(char)
-		case char >= '0' && char <= '9':
-			b.WriteRune(char)
-		case char == '-' || char == '.':
-			b.WriteRune(char)
-		default:
-			b.WriteByte('_')
-		}
+	defer directory.Close()
+	if err := directory.Sync(); err != nil {
+		return fmt.Errorf("sync archive directory: %w", err)
 	}
-	return b.String()
+	return nil
 }

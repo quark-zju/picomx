@@ -5,33 +5,30 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
-func TestDeliverPublishesImmutableMessageInMonthlyArchive(t *testing.T) {
+func TestDeliverPublishesSequentialMessageAndState(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	now := time.Date(2026, time.August, 30, 12, 34, 56, 789, time.FixedZone("PDT", -7*60*60))
-	store := newStore(root, "mail/host", func() time.Time { return now })
-
-	path, err := store.Deliver(strings.NewReader("From: sender@example.org\r\n\r\nhello\r\n"))
+	store, err := New(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := filepath.Dir(path), filepath.Join(root, "2026", "08"); got != want {
-		t.Fatalf("message directory = %q, want %q", got, want)
+	message := "From: sender@example.org\r\n\r\nhello\r\n"
+	path, err := store.Deliver(strings.NewReader(message))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.HasSuffix(path, ".mail_host.eml") {
-		t.Fatalf("unsafe hostname was not sanitized in %q", path)
+	if got, want := path, filepath.Join(root, "1", "001.eml"); got != want {
+		t.Fatalf("message path = %q, want %q", got, want)
 	}
-
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(content), "From: sender@example.org\r\n\r\nhello\r\n"; got != want {
-		t.Fatalf("message = %q, want %q", got, want)
+	if got := string(content); got != message {
+		t.Fatalf("message = %q, want %q", got, message)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -39,6 +36,16 @@ func TestDeliverPublishesImmutableMessageInMonthlyArchive(t *testing.T) {
 	}
 	if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
 		t.Fatalf("mode = %o, want %o", got, want)
+	}
+	state, err := readMailboxState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := state.LastID, uint64(1); got != want {
+		t.Fatalf("last ID = %d, want %d", got, want)
+	}
+	if got, want := state.TotalOctets, uint64(len(message)); got != want {
+		t.Fatalf("total octets = %d, want %d", got, want)
 	}
 	entries, err := os.ReadDir(filepath.Join(root, "tmp"))
 	if err != nil {
@@ -49,13 +56,14 @@ func TestDeliverPublishesImmutableMessageInMonthlyArchive(t *testing.T) {
 	}
 }
 
-func TestDeliverUsesUniqueNamesAtSameInstant(t *testing.T) {
+func TestDeliverUsesSequentialIDs(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	now := time.Unix(123, 456)
-	store := newStore(root, "host", func() time.Time { return now })
-
+	store, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	first, err := store.Deliver(strings.NewReader("first"))
 	if err != nil {
 		t.Fatal(err)
@@ -64,8 +72,18 @@ func TestDeliverUsesUniqueNamesAtSameInstant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first == second {
-		t.Fatalf("deliveries reused path %q", first)
+	if got, want := first, filepath.Join(root, "1", "001.eml"); got != want {
+		t.Fatalf("first path = %q, want %q", got, want)
+	}
+	if got, want := second, filepath.Join(root, "1", "002.eml"); got != want {
+		t.Fatalf("second path = %q, want %q", got, want)
+	}
+	state, err := readMailboxState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.LastID != 2 || state.TotalOctets != uint64(len("firstsecond")) {
+		t.Fatalf("state = %+v", state)
 	}
 }
 
@@ -73,9 +91,14 @@ func TestDeliverNeverOverwritesExistingMessage(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	now := time.Unix(123, 456)
-	firstStore := newStore(root, "host", func() time.Time { return now })
-	secondStore := newStore(root, "host", func() time.Time { return now })
+	firstStore, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondStore, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	path, err := firstStore.Deliver(strings.NewReader("original"))
 	if err != nil {
