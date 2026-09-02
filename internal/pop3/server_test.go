@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"testing"
 
@@ -26,6 +27,7 @@ func (m fakeMailbox) Size(id uint64) (uint64, error) {
 	}
 	return size, nil
 }
+func (m fakeMailbox) Open(uint64) (*os.File, error) { return nil, archive.ErrNoSuchMessage }
 
 func TestAuthorizationCapturesSnapshot(t *testing.T) {
 	t.Parallel()
@@ -82,6 +84,50 @@ func TestMailboxListingsUseAuthenticatedSnapshot(t *testing.T) {
 	expectLines(t, responses, "+OK listing follows", "1 picomx-1", "2 picomx-2", ".")
 	writeLine(t, client, "LIST 3")
 	expectLine(t, responses, "-ERR no such message")
+}
+
+func TestRetrieveAndTopStreamCanonicalMessage(t *testing.T) {
+	t.Parallel()
+
+	store, err := archive.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := "Subject: test\r\nX-Test: yes\r\n\r\nfirst\r\n.second\r\nthird\r\n"
+	if _, err := store.Deliver(strings.NewReader(message)); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(Options{
+		Hostname:    "pop.example.com",
+		Mailbox:     store,
+		Credentials: testCredentials(t, "alice", "password"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, responses := startSession(t, server)
+	expectLine(t, responses, "+OK pop.example.com picomx ready")
+	login(t, client, responses, "alice", "password")
+	writeLine(t, client, "TOP 1 1")
+	expectLines(t, responses,
+		"+OK top of message follows",
+		"Subject: test",
+		"X-Test: yes",
+		"",
+		"first",
+		".",
+	)
+	writeLine(t, client, "RETR 1")
+	expectLines(t, responses,
+		fmt.Sprintf("+OK %d octets", len(message)),
+		"Subject: test",
+		"X-Test: yes",
+		"",
+		"first",
+		"..second",
+		"third",
+		".",
+	)
 }
 
 func TestAuthorizationFailsClosedAndLimitsAttempts(t *testing.T) {

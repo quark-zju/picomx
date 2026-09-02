@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ const (
 type mailbox interface {
 	Snapshot() archive.Snapshot
 	Size(uint64) (uint64, error)
+	Open(uint64) (*os.File, error)
 }
 
 // Options configures the POP3 protocol state machine.
@@ -106,7 +108,7 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 				s.reply(conn, writer, "-ERR invalid arguments")
 				continue
 			}
-			s.replyMulti(conn, writer, []string{"+OK Capability list follows", "USER", "IMPLEMENTATION picomx"})
+			s.replyMulti(conn, writer, []string{"+OK Capability list follows", "USER", "UIDL", "TOP", "IMPLEMENTATION picomx"})
 		case "USER":
 			if authenticated || strings.TrimSpace(argument) == "" {
 				s.reply(conn, writer, "-ERR command not valid now")
@@ -186,6 +188,51 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 			if !s.writeListing(conn, writer, snapshot.LastID, func(id uint64) (string, error) {
 				return fmt.Sprintf("%d %s", id, uniqueID(id)), nil
 			}) {
+				return
+			}
+		case "RETR":
+			if !authenticated {
+				s.reply(conn, writer, "-ERR authenticate first")
+				continue
+			}
+			id, ok := messageID(argument, snapshot.LastID)
+			if !ok {
+				s.reply(conn, writer, "-ERR no such message")
+				continue
+			}
+			size, err := s.mailbox.Size(id)
+			if err != nil {
+				s.reply(conn, writer, "-ERR unable to inspect message")
+				continue
+			}
+			file, err := s.mailbox.Open(id)
+			if err != nil {
+				s.reply(conn, writer, "-ERR unable to open message")
+				continue
+			}
+			ok = s.streamMessage(conn, writer, file, fmt.Sprintf("+OK %d octets", size), nil)
+			_ = file.Close()
+			if !ok {
+				return
+			}
+		case "TOP":
+			if !authenticated {
+				s.reply(conn, writer, "-ERR authenticate first")
+				continue
+			}
+			id, bodyLines, ok := topArguments(argument, snapshot.LastID)
+			if !ok {
+				s.reply(conn, writer, "-ERR invalid arguments")
+				continue
+			}
+			file, err := s.mailbox.Open(id)
+			if err != nil {
+				s.reply(conn, writer, "-ERR unable to open message")
+				continue
+			}
+			ok = s.streamMessage(conn, writer, file, "+OK top of message follows", &bodyLines)
+			_ = file.Close()
+			if !ok {
 				return
 			}
 		case "QUIT":
@@ -281,6 +328,69 @@ func messageID(argument string, lastID uint64) (uint64, bool) {
 
 func uniqueID(id uint64) string {
 	return "picomx-" + strconv.FormatUint(id, 36)
+}
+
+func topArguments(argument string, lastID uint64) (uint64, uint64, bool) {
+	fields := strings.Fields(argument)
+	if len(fields) != 2 {
+		return 0, 0, false
+	}
+	id, ok := messageID(fields[0], lastID)
+	if !ok {
+		return 0, 0, false
+	}
+	lines, err := strconv.ParseUint(fields[1], 10, 64)
+	return id, lines, err == nil
+}
+
+func (s *Server) streamMessage(conn net.Conn, writer *bufio.Writer, source io.Reader, greeting string, bodyLimit *uint64) bool {
+	if err := conn.SetWriteDeadline(time.Now().Add(s.idleTimeout)); err != nil {
+		return false
+	}
+	if _, err := writer.WriteString(greeting + "\r\n"); err != nil {
+		return false
+	}
+	reader := bufio.NewReader(source)
+	inBody := false
+	bodyLines := uint64(0)
+	lastEndedWithLF := true
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			if bodyLimit != nil && inBody && bodyLines >= *bodyLimit {
+				break
+			}
+			if len(line) > 0 && line[0] == '.' {
+				if err := writer.WriteByte('.'); err != nil {
+					return false
+				}
+			}
+			if _, writeErr := writer.Write(line); writeErr != nil {
+				return false
+			}
+			lastEndedWithLF = line[len(line)-1] == '\n'
+			if inBody {
+				bodyLines++
+			} else if string(line) == "\r\n" {
+				inBody = true
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return false
+		}
+	}
+	if !lastEndedWithLF {
+		if _, err := writer.WriteString("\r\n"); err != nil {
+			return false
+		}
+	}
+	if _, err := writer.WriteString(".\r\n"); err != nil {
+		return false
+	}
+	return writer.Flush() == nil
 }
 
 func clientIP(address net.Addr) string {
