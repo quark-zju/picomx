@@ -28,6 +28,10 @@ func New(root string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	state, err = recoverMailboxTail(root, state)
+	if err != nil {
+		return nil, err
+	}
 	return &Store{root: root, state: state}, nil
 }
 
