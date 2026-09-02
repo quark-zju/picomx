@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"picomx/internal/archive"
 )
@@ -128,6 +129,48 @@ func TestRetrieveAndTopStreamCanonicalMessage(t *testing.T) {
 		"third",
 		".",
 	)
+}
+
+func TestReadOnlyTransactionCommands(t *testing.T) {
+	t.Parallel()
+
+	mailbox := fakeMailbox{
+		snapshot: archive.Snapshot{LastID: 1, TotalOctets: 10},
+		sizes:    map[uint64]uint64{1: 10},
+	}
+	server, err := NewServer(Options{
+		Hostname:    "pop.example.com",
+		Mailbox:     mailbox,
+		Credentials: testCredentials(t, "alice", "password"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, responses := startSession(t, server)
+	expectLine(t, responses, "+OK pop.example.com picomx ready")
+	writeLine(t, client, "DELE 1")
+	expectLine(t, responses, "-ERR authenticate first")
+	login(t, client, responses, "alice", "password")
+	writeLine(t, client, "DELE 1")
+	expectLine(t, responses, "-ERR archive is read-only")
+	writeLine(t, client, "RSET")
+	expectLine(t, responses, "+OK no messages deleted")
+	writeLine(t, client, "NOOP")
+	expectLine(t, responses, "+OK")
+	writeLine(t, client, "QUIT")
+	expectLine(t, responses, "+OK bye")
+}
+
+func TestServerRejectsShortIdleTimeout(t *testing.T) {
+	t.Parallel()
+
+	if _, err := NewServer(Options{
+		Hostname:    "pop.example.com",
+		Mailbox:     fakeMailbox{},
+		IdleTimeout: minimumIdleTimeout - time.Second,
+	}); err == nil {
+		t.Fatal("NewServer accepted POP3 idle timeout below RFC minimum")
+	}
 }
 
 func TestAuthorizationFailsClosedAndLimitsAttempts(t *testing.T) {

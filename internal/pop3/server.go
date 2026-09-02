@@ -235,6 +235,28 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 			if !ok {
 				return
 			}
+		case "DELE":
+			if !authenticated {
+				s.reply(conn, writer, "-ERR authenticate first")
+				continue
+			}
+			if _, ok := messageID(argument, snapshot.LastID); !ok {
+				s.reply(conn, writer, "-ERR no such message")
+				continue
+			}
+			s.reply(conn, writer, "-ERR archive is read-only")
+		case "RSET":
+			if !authenticated || argument != "" {
+				s.reply(conn, writer, "-ERR command not valid now")
+				continue
+			}
+			s.reply(conn, writer, "+OK no messages deleted")
+		case "NOOP":
+			if !authenticated || argument != "" {
+				s.reply(conn, writer, "-ERR command not valid now")
+				continue
+			}
+			s.reply(conn, writer, "+OK")
 		case "QUIT":
 			if argument != "" {
 				s.reply(conn, writer, "-ERR invalid arguments")
