@@ -87,6 +87,45 @@ func TestDeliverUsesSequentialIDs(t *testing.T) {
 	}
 }
 
+func TestStageRemainsInvisibleUntilPublish(t *testing.T) {
+	t.Parallel()
+
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged, err := store.Stage(strings.NewReader("staged"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer staged.Discard()
+	if got := store.Snapshot(); got != (Snapshot{}) {
+		t.Fatalf("snapshot before publish = %+v", got)
+	}
+	file, err := staged.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(file.Name())
+	_ = file.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "staged" || staged.Size() != uint64(len("staged")) {
+		t.Fatalf("staged content = %q, size %d", content, staged.Size())
+	}
+	id, path, err := store.Publish(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 1 || path == "" {
+		t.Fatalf("Publish = %d, %q", id, path)
+	}
+	if got := store.Snapshot(); got != (Snapshot{LastID: 1, TotalOctets: 6}) {
+		t.Fatalf("snapshot after publish = %+v", got)
+	}
+}
+
 func TestDeliverNeverOverwritesExistingMessage(t *testing.T) {
 	t.Parallel()
 
