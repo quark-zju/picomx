@@ -73,7 +73,7 @@ install-systemd:
 
 override-systemd:
 	@if [ -z "$(SMTP_PORT)" ]; then \
-		echo "usage: make override-systemd SMTP_PORT=2525 [POP3_PORT=995]" >&2; \
+		echo "usage: make override-systemd SMTP_PORT=2525" >&2; \
 		exit 2; \
 	fi
 	$(SUDO) install -d -m 755 $(SYSTEMD_OVERRIDE_DIR)
@@ -83,7 +83,7 @@ override-systemd:
 		echo '[Socket]'; \
 		echo 'ListenStream='; \
 		echo 'ListenStream=$(SMTP_PORT)'; \
-		echo 'ListenStream=$(or $(POP3_PORT),995)'; \
+		echo 'ListenStream=995'; \
 	} >"$$tmp_override"; \
 	$(SUDO) install -m 644 "$$tmp_override" $(SYSTEMD_OVERRIDE_FILE); \
 	$(SUDO) systemctl daemon-reload; \

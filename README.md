@@ -59,7 +59,7 @@ journalctl -u picomx.service -f
 ```
 
 如果本机无法使用 TCP/25，可以为 `picomx.socket` 创建本地 systemd override，例如将 SMTP
-改为 2525（POP3S 仍为 995）：
+改为 2525（POP3S 固定为 995）：
 
 ```sh
 make override-systemd SMTP_PORT=2525
