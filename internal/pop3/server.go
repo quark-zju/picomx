@@ -150,6 +150,17 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 			return
 		}
 		command, argument := splitCommand(line)
+		logAttrs := []any{
+			"protocol", "pop3",
+			"client_ip", remoteIP,
+			"tls_version", tlsVersion,
+			"command", command,
+		}
+		// Never include the PASS argument in logs; it contains the app password.
+		if command != "PASS" && argument != "" {
+			logAttrs = append(logAttrs, "argument", argument)
+		}
+		s.logger.Info("POP3 command", logAttrs...)
 		switch command {
 		case "CAPA":
 			if argument != "" {
@@ -187,6 +198,12 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 			}
 			authenticated = true
 			snapshot = s.mailbox.Snapshot()
+			s.logger.Info("POP3 authentication succeeded",
+				"protocol", "pop3",
+				"client_ip", remoteIP,
+				"tls_version", tlsVersion,
+				"username", username,
+			)
 			s.reply(conn, writer, fmt.Sprintf("+OK maildrop ready with %d messages", snapshot.LastID))
 		case "STAT":
 			if !authenticated || argument != "" {

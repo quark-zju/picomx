@@ -2,12 +2,14 @@ package pop3
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -57,6 +59,39 @@ func TestAuthorizationCapturesSnapshot(t *testing.T) {
 	expectLine(t, responses, "+OK maildrop ready with 7 messages")
 	writeLine(t, client, "QUIT")
 	expectLine(t, responses, "+OK bye")
+}
+
+func TestLogsSuccessfulAuthenticationAndCommandsWithoutPassword(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	server, err := NewServer(Options{
+		Hostname:    "pop.example.com",
+		Mailbox:     fakeMailbox{},
+		Credentials: testCredentials(t, "alice", "super-secret"),
+		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, responses := startSession(t, server)
+	expectLine(t, responses, "+OK pop.example.com picomx ready")
+	login(t, client, responses, "alice", "super-secret")
+	writeLine(t, client, "STAT")
+	expectLine(t, responses, "+OK 0 0")
+	writeLine(t, client, "QUIT")
+	expectLine(t, responses, "+OK bye")
+
+	output := logs.String()
+	if !strings.Contains(output, `"msg":"POP3 authentication succeeded"`) {
+		t.Fatalf("logs do not contain successful authentication: %s", output)
+	}
+	if !strings.Contains(output, `"command":"STAT"`) {
+		t.Fatalf("logs do not contain POP3 command: %s", output)
+	}
+	if strings.Contains(output, "super-secret") {
+		t.Fatalf("logs contain the POP3 password: %s", output)
+	}
 }
 
 func TestMailboxListingsUseAuthenticatedSnapshot(t *testing.T) {
