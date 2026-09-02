@@ -3,6 +3,7 @@ package pop3
 
 import (
 	"bufio"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"picomx/internal/archive"
@@ -34,6 +36,7 @@ type Options struct {
 	Credentials     Credentials
 	IdleTimeout     time.Duration
 	MaxAuthFailures int
+	MaxConnections  int
 	Logger          *slog.Logger
 }
 
@@ -44,7 +47,9 @@ type Server struct {
 	credentials     Credentials
 	idleTimeout     time.Duration
 	maxAuthFailures int
+	connections     chan struct{}
 	logger          *slog.Logger
+	wg              sync.WaitGroup
 }
 
 // NewServer validates POP3 options.
@@ -64,6 +69,9 @@ func NewServer(options Options) (*Server, error) {
 	if options.MaxAuthFailures <= 0 {
 		options.MaxAuthFailures = 3
 	}
+	if options.MaxConnections <= 0 {
+		options.MaxConnections = 16
+	}
 	if options.Logger == nil {
 		options.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
@@ -73,8 +81,48 @@ func NewServer(options Options) (*Server, error) {
 		credentials:     options.Credentials,
 		idleTimeout:     options.IdleTimeout,
 		maxAuthFailures: options.MaxAuthFailures,
+		connections:     make(chan struct{}, options.MaxConnections),
 		logger:          options.Logger,
 	}, nil
+}
+
+// Serve accepts implicit TLS connections until listener is closed.
+func (s *Server) Serve(listener net.Listener, tlsConfig *tls.Config) error {
+	if tlsConfig == nil {
+		return errors.New("POP3S TLS configuration is required")
+	}
+	defer s.wg.Wait()
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+		select {
+		case s.connections <- struct{}{}:
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				defer func() { <-s.connections }()
+				s.serveTLSConn(conn, tlsConfig)
+			}()
+		default:
+			_ = conn.Close()
+		}
+	}
+}
+
+func (s *Server) serveTLSConn(conn net.Conn, tlsConfig *tls.Config) {
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(s.idleTimeout)); err != nil {
+		return
+	}
+	tlsConn := tls.Server(conn, tlsConfig.Clone())
+	if err := tlsConn.Handshake(); err != nil {
+		s.logger.Info("POP3S TLS handshake failed", "client_ip", clientIP(conn.RemoteAddr()), "error", err)
+		return
+	}
+	state := tlsConn.ConnectionState()
+	s.serveConn(tlsConn, state.Version)
 }
 
 func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {

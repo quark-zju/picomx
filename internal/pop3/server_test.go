@@ -173,6 +173,18 @@ func TestServerRejectsShortIdleTimeout(t *testing.T) {
 	}
 }
 
+func TestServeRequiresImplicitTLS(t *testing.T) {
+	t.Parallel()
+
+	server, err := NewServer(Options{Hostname: "pop.example.com", Mailbox: fakeMailbox{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Serve(nil, nil); err == nil {
+		t.Fatal("Serve accepted a nil TLS configuration")
+	}
+}
+
 func TestAuthorizationFailsClosedAndLimitsAttempts(t *testing.T) {
 	t.Parallel()
 
