@@ -1,7 +1,7 @@
-# picomx 策略接口草案
+# picomx 策略与 POP3S 接口
 
-本文是待评审设计，不是兼容性承诺。目标是让本机管理员用 Go 编写收件、反垃圾和
-POP3S 可见性规则，同时让协议实现继续负责状态机、错误码、资源限制与秘密处理。
+本文描述当前接口方向，但仍不承诺长期 API 兼容。目标是让本机管理员用 Go 编写收件和
+反垃圾规则，同时让协议实现继续负责状态机、错误码、资源限制与秘密处理。
 
 ## 进程与权限边界
 
@@ -20,7 +20,7 @@ SMTP 分两阶段决策。RCPT 阶段只提供 envelope 信息，适合低成本
 进入有上限的 unpublished staging file 后才运行消息规则。只有规则接受且文件持久化后
 才返回 `250`。规则拒绝时直接在当前 SMTP 会话返回 5xx，绝不先接受再产生 backscatter。
 
-建议的公共接口轮廓：
+当前公共接口轮廓：
 
 ```go
 type SMTPPolicy interface {
@@ -36,10 +36,10 @@ type RecipientRequest struct {
 
 type RecipientAction int
 const (
-    RecipientAccept RecipientAction = iota
-    RecipientRejectUnknown // 映射为 550 5.1.1
-    RecipientRejectPolicy  // 映射为 550 5.7.1
+    RecipientRejectPolicy RecipientAction = iota // 映射为 550 5.7.1
+    RecipientRejectUnknown                       // 映射为 550 5.1.1
     RecipientTempFail      // 映射为 451 4.7.1
+    RecipientAccept
 )
 
 type RecipientDecision struct {
@@ -55,9 +55,9 @@ type MessageRequest interface {
 
 type MessageAction int
 const (
-    MessageAccept MessageAction = iota
-    MessageRejectPolicy // 映射为 550 5.7.1
-    MessageTempFail     // 映射为 451 4.7.1
+    MessageTempFail MessageAction = iota // 映射为 451 4.7.1
+    MessageRejectPolicy                 // 映射为 550 5.7.1
+    MessageAccept
 )
 
 type MessageDecision struct {
@@ -71,7 +71,7 @@ type MessageDecision struct {
 `250` 接受并写入独立 append-only 树。
 
 `MessageMetadata` 只包含已经规范化的值：远端 IP、EHLO、是否 TLS、envelope-from、全部
-envelope recipients、接收时间、字节数和内部 message ID。不要把原始命令行或日志对象
+envelope recipients、接收时间和字节数。不要把原始命令行或日志对象
 直接交给策略。邮件头有单独上限；正文仅在规则调用 `Open` 时读取。
 
 规则在 SMTP 进程内运行，因此必须是本地、确定且有界的。systemd 继续禁止出站
@@ -100,6 +100,4 @@ hash 用户名和密码并 constant-time 比较；环境配置缺失或不完整
 - `STAT`、带参数的 `LIST`/`UIDL` 和单封读取均为常数或有界目录访问；只有客户端明确
   请求不带参数的 `LIST`/`UIDL` 时才遍历或生成全部邮件项。
 
-## 待确认项
-
-1. anti-spam 首版是否只需 accept/reject/tempfail，还是必须有 append-only quarantine。
+首版只实现 accept、reject 和 tempfail，不提供 silent discard 或 quarantine。

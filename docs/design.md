@@ -72,8 +72,7 @@ messages/
 notmuch 可以递归索引任意“一封邮件一个文件”的树，不要求 Maildir；只是这种布局不能
 把 notmuch tags 同步为文件名 flags，符合存档不可变的目标。Git 仓库提交已发布的 ID
 目录和 state；`.gitignore` 忽略 `tmp/`，避免同步半封邮件。notmuch 数据库不应提交：
-它可重建、
-经常变化，并包含可还原的邮件内容。
+它可重建、经常变化，并包含可还原的邮件内容。
 
 ## 入站 SMTP 的首版约束
 
@@ -84,7 +83,7 @@ notmuch 可以递归索引任意“一封邮件一个文件”的树，不要求
 - 保存原始 RFC 5322 内容，并在前面添加 `Return-Path`、`Delivered-To` 和本机
   `Received` 投递头；
 - JSON 结构化日志只记录 envelope、大小、远端地址和结果，不记录正文；
-- 由 systemd socket activation 持有 25 端口，服务进程不使用 root。
+- 由 systemd socket activation 持有 25 和 995 端口，服务进程不使用 root。
 
 catch-all 会增加垃圾邮件与磁盘耗尽风险。“暂不做收信反垃圾”不应取消资源限制；首版
 仍需拒绝未知域、过大邮件、过多收件人和超时连接。后续可以增加地址令牌或显式地址表，
@@ -122,6 +121,6 @@ relay 凭据、不解析本地 submission，也不需要出站网络权限。随
 
 1. 收信域名与 MX/EHLO 主机名；
 2. catch-all 是否长期保留，还是以后只允许显式地址/带随机令牌的地址；
-3. Git 同步的拓扑（服务器 push、客户端 pull，或客户端经 SSH pull）以及邮件静态加密需求。
+3. 是否额外使用 Git 同步归档，以及邮件静态加密需求。
 
-POP3S 与可编程策略的拟议边界见 [policy-api.md](policy-api.md)，尚未实现。
+POP3S 与可编程策略的边界见 [policy-api.md](policy-api.md)。
