@@ -1,0 +1,30 @@
+// Copy to internal/config/custom_local.go with `make config`.
+// This trusted local policy is compiled into picomx and intentionally ignored
+// by version control.
+package config
+
+import "strings"
+
+func init() {
+	SetSMTPPolicyFactory(func() SMTPPolicy { return localSMTPPolicy{} })
+}
+
+type localSMTPPolicy struct{}
+
+func (localSMTPPolicy) EvaluateRecipient(request RecipientRequest) RecipientDecision {
+	// Configured domains remain a hard boundary in the SMTP server. This hook
+	// can further restrict catch-all local parts without creating relay rules.
+	if strings.HasPrefix(strings.ToLower(request.Recipient.Local), "blocked-") {
+		return RecipientDecision{Action: RecipientRejectUnknown, Reason: "blocked_local_part"}
+	}
+	return RecipientDecision{Action: RecipientAccept, Reason: "local_catch_all"}
+}
+
+func (localSMTPPolicy) EvaluateMessage(request MessageRequest) MessageDecision {
+	// Header parsing is lazy and bounded. Call request.Open() only when a rule
+	// needs to stream the complete staged message body.
+	if strings.Contains(strings.ToLower(request.Header().Get("Subject")), "example spam") {
+		return MessageDecision{Action: MessageRejectPolicy, Reason: "subject_rule"}
+	}
+	return MessageDecision{Action: MessageAccept, Reason: "local_accept"}
+}

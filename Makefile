@@ -8,13 +8,15 @@ SYSTEMD_DIR ?= /etc/systemd/system
 CONFIG_DIR ?= /etc/picomx
 ENV_FILE ?= $(CONFIG_DIR)/picomx.env
 ENV_EXAMPLE := examples/picomx.env.example
+CUSTOM_POLICY := internal/config/custom_local.go
+CUSTOM_POLICY_EXAMPLE := examples/custom_local.go.example
 SERVICE_USER ?= picomx
 SERVICE_GROUP ?= $(SERVICE_USER)
 FAIL2BAN_FILTER_DIR ?= /etc/fail2ban/filter.d
 FAIL2BAN_JAIL_DIR ?= /etc/fail2ban/jail.d
 SUDO ?= sudo
 
-.PHONY: build test fmt install setup-user install-config install-systemd install-fail2ban deploy deploy-fail2ban
+.PHONY: build test fmt config install setup-user install-config install-systemd install-fail2ban deploy deploy-fail2ban
 
 build:
 	go build -o $(BINARY) $(BUILD_TARGET)
@@ -24,6 +26,12 @@ test:
 
 fmt:
 	gofmt -w $$(find . -name '*.go' -type f)
+
+config:
+	@if [ ! -f $(CUSTOM_POLICY) ]; then \
+		cp $(CUSTOM_POLICY_EXAMPLE) $(CUSTOM_POLICY); \
+	fi
+	EDITOR="$${EDITOR:-vim}" sh -c '"$$EDITOR" "$(CUSTOM_POLICY)"'
 
 install: build
 	$(SUDO) install -m 755 $(BINARY) $(INSTALL_PATH)
