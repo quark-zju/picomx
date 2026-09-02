@@ -31,6 +31,18 @@ SMTP 和 POP3S 由同一个非 root 进程提供，共享归档和 TLS 证书。
 解析器与 POP 凭据位于同一信任边界，以换取更小的代码和部署面。两种协议分别限制
 连接数，避免 POP 登录攻击耗尽 SMTP 接收能力。进程仍禁止主动建立网络连接。
 
+## TLS 证书
+
+SMTP STARTTLS 和 POP3S 使用同一张固定证书。配置给出证书目录和全部服务 hostname；
+picomx 从主 hostname 开始逐级尝试完整域名和父域目录，例如依次查找
+`mx.example.net/`、`example.net/`。候选证书必须通过 `VerifyHostname` 覆盖所有配置的
+hostname，因此可以复用父域目录中的通配符证书，但不依赖客户端发送 SNI。
+
+进程缓存一张已经解析的证书。后台定期读取 PEM 并比较内容 hash；内容变化时只有在
+证书、私钥匹配且证书当前有效并覆盖全部 hostname 后才原子替换，失败时继续使用旧值。
+同时按剩余 30 天、7 天、1 天和已经过期记录限频结构化日志。picomx 只负责发现和热
+加载续期结果，不负责 ACME 申请或续期。
+
 ## 存储布局
 
 存档使用连续 archive ID 和有界 fanout，不保存可变的已读状态。ID 以 base-1024 digit
