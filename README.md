@@ -164,34 +164,36 @@ TLS），用户名和部署时生成的 app password；不要选择明文 POP3 �
 ## bare Git 与历史恢复
 
 `messages/` 本身是 bare Git 仓库，没有工作目录；`state` 和 `.eml` 路径存在于 Git
-提交的树中。邮件按原始字节保存，不经过换行转换或 clean/smudge 过滤。删除区间与
-累计删除数保存在 `state` 中；`last_id` 始终递增，删除全部邮件也不会重用旧 ID。
-物理目录中的 `tmp/` 只存放未发布邮件和读取用的临时文件，不进入提交。
+提交的树中。邮件按原始字节保存，不经过换行转换或 clean/smudge 过滤。文件名包含
+大小，例如 `1/001-s123.eml` 是 ID 1、123 字节。`state` 维护各目录存活邮件数和总字节数；
+`last_id` 始终递增，删除全部邮件也不会重用旧 ID。
+物理目录中的 `tmp/` 只存放未发布邮件，不进入提交。
 
 ```sh
 sudo -u picomx git --git-dir=/var/lib/picomx/messages show HEAD:state
 sudo -u picomx git --git-dir=/var/lib/picomx/messages ls-tree -r HEAD
 ```
 
-守护进程通过 `fast-import` 写入提交，并通过其 `ls` / `cat-blob` 读取快照。每次变更
-执行 checkpoint 并确认 HEAD 更新后才返回成功；进程空闲 30 秒后通过 EOF 退出，
-下次操作重新启动。仅查询邮件大小使用 `cat-file -s`，避免读取整封正文。
+守护进程通过 `fast-import` 写入提交，每次变更执行 checkpoint 并确认 HEAD 更新后才
+返回成功。另一个常驻 `cat-file --batch-command` 读取 tree 和正文；二者空闲 30 秒后
+通过 EOF 退出，下次操作按需启动。正文直接走 Git 管道，关闭 reader 时丢弃未读部分并
+恢复协议边界，不创建正文临时文件。目录 LRU 缓存最多 64 个叶目录，每个至多 1024 封；
+以目录路径和 tree OID 为键，内容未变时可跨提交复用。`LIST` 从文件名取得大小，
+列目录、单封大小查询和读取正文均复用 reader，不启动逐次 `ls-tree` / `cat-file -s`。
 Git 只做本地操作，禁用 hooks、fsmonitor、提交签名和自动维护，不持有 Git 凭据。
 systemd 的 `ProtectSystem=strict`、`ProtectHome=yes` 和出站 `connect(2)` 禁令保持不变。
 
 已有普通文件存档会在首次启动时导入 bare 仓库，保留原 `.eml` 文件供管理员确认；
 后续以 Git 中的 state 为准，不再读取或修改这些旧副本。确认迁移和备份后可自行
-清理旧副本。若已有带工作目录的 Git 仓库，先停服，用 `git clone --bare` 克隆到
-新目录，确认所有邮件已提交，并把 `PICOMX_ARCHIVE_ROOT` 指向新目录；picomx 不会
-自动转换或删除已有 `.git/`。
+清理旧副本。迁移入口仅支持原始非 Git、版本 1 文件存档；未部署的中间 Git 格式
+不提供迁移。已有 `.git/` 的工作目录会被拒绝，不自动转换或删除。
 
-查看某封已删除邮件的历史并导出原文（以下路径对应 ID 123；将 `COMMIT` 替换为仍包含
-该文件的提交）：
+查看某封已删除邮件的历史并导出原文（以下示例对应 ID 123、456 字节；将路径和 `COMMIT` 替换为实际值）：
 
 ```sh
-sudo -u picomx git --git-dir=/var/lib/picomx/messages log --oneline -- 1/07b.eml
+sudo -u picomx git --git-dir=/var/lib/picomx/messages log --oneline -- 1/07b-s456.eml
 umask 077
-sudo -u picomx git --git-dir=/var/lib/picomx/messages show COMMIT:1/07b.eml > recovered-123.eml
+sudo -u picomx git --git-dir=/var/lib/picomx/messages show COMMIT:1/07b-s456.eml > recovered-123.eml
 ```
 
 仓库由单个 picomx 进程管理。外部写入、恢复和 Git 维护应先停止服务；不要重置或改写
