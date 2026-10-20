@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,7 @@ type fakeMailbox struct {
 	singleSizeError error
 }
 
-func (m fakeMailbox) Delete([]uint64) error { return m.deleteError }
+func (m fakeMailbox) DeleteAs([]uint64, string) error { return m.deleteError }
 
 func (m fakeMailbox) Snapshot() archive.Snapshot {
 	snapshot := m.snapshot
@@ -575,5 +576,38 @@ func TestMalformedPasswordCommandsDoNotLeakIntoLogs(t *testing.T) {
 	}
 	if !strings.Contains(output, `"command":"unknown"`) {
 		t.Fatal("unknown commands were not logged safely")
+	}
+}
+
+func TestDeletionCommitUsesAuthenticatedSessionUsername(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	store, err := testArchive(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver(strings.NewReader("Subject: source\r\nUser-Agent: SenderClient\r\n\r\nbody\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(Options{Hostname: "pop.example.com", Mailbox: store, Credentials: testCredentials(t, "alice", "super-secret")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, responses := startSession(t, server)
+	expectLine(t, responses, "+OK pop.example.com picomx ready")
+	login(t, client, responses, "alice", "super-secret")
+	writeLine(t, client, "DELE 1")
+	expectLine(t, responses, "+OK message marked for deletion")
+	writeLine(t, client, "QUIT")
+	expectLine(t, responses, "+OK bye")
+	raw, err := exec.Command("git", "--git-dir="+root, "log", "-1", "--format=%B").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "mail: delete 1 messages\n\nPOP3 user: alice\n" {
+		t.Fatalf("deletion commit = %q", raw)
+	}
+	if bytes.Contains(raw, []byte("super-secret")) || bytes.Contains(raw, []byte("SenderClient")) {
+		t.Fatalf("commit mixed password or sender agent with session actor: %q", raw)
 	}
 }

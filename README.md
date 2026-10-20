@@ -155,6 +155,8 @@ openssl s_client -starttls smtp -connect mx.example.net:25 -servername mx.exampl
 客户端应设置为：服务器 `mx.example.net`、端口 `995`、SSL/TLS 为“连接时启用”（隐式
 TLS），用户名和部署时生成的 app password；不要选择明文 POP3 或 STLS。客户端可以选择保留服务器邮件，或下载后删除。`DELE` 只在本会话中标记，
 正常 `QUIT` 时才批量提交删除；`RSET` 撤销标记，断线不删除。删除后原文仍保留在 Git 历史中。
+删除提交的说明正文记录 `POP3 user: <已认证用户名>`，Git committer 仍为 picomx。
+目前 POP3 没有可用的客户端 User-Agent 信息，不会把邮件中的发件客户端头当作登录客户端。
 
 如果证书、端口或收件域不匹配，优先依次检查 `dig` 结果、云/主机防火墙、
 `systemctl status` 和 `journalctl`；修改证书后服务会自动热加载，无需重启。

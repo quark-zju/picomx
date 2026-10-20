@@ -27,7 +27,7 @@ type mailbox interface {
 	ListAt(archive.Snapshot, func(number, id, size uint64) error) error
 	Lookup(archive.Snapshot, uint64) (archive.Message, error)
 	OpenMessage(archive.Snapshot, archive.Message) (io.ReadCloser, error)
-	Delete([]uint64) error
+	DeleteAs([]uint64, string) error
 }
 
 // Options configures the POP3 protocol state machine.
@@ -361,7 +361,7 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 				for _, permanentID := range deleted {
 					ids = append(ids, permanentID)
 				}
-				if err := s.mailbox.Delete(ids); err != nil {
+				if err := s.mailbox.DeleteAs(ids, username); err != nil {
 					s.logger.Error("POP3 deletion failed", "protocol", "pop3", "client_ip", remoteIP, "error", err)
 					s.reply(conn, writer, "-ERR unable to commit deletions")
 					return

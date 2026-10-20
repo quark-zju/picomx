@@ -340,3 +340,39 @@ func TestLostHEADDoesNotReimportLegacyMailOrReuseIDs(t *testing.T) {
 		})
 	}
 }
+
+func TestDeletionCommitRecordsActorWithoutForgedMetadataLines(t *testing.T) {
+	t.Parallel()
+	store, err := testNew(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, username := range []string{"alice", "用户", "line\nbreak"} {
+		if _, err := store.Deliver(strings.NewReader("body")); err != nil {
+			t.Fatal(err)
+		}
+		id := store.Snapshot().LastID
+		if err := store.DeleteAs([]uint64{id}, username); err != nil {
+			t.Fatal(err)
+		}
+		message, err := store.git(nil, "log", "-1", "--format=%B")
+		if err != nil {
+			t.Fatal(err)
+		}
+		actor := username
+		if username == "line\nbreak" {
+			actor = `"line\nbreak"`
+		}
+		want := "mail: delete 1 messages\n\nPOP3 user: " + actor + "\n"
+		if string(message) != want {
+			t.Fatalf("commit message = %q, want %q", message, want)
+		}
+		head := store.headID
+		if err := store.DeleteAs([]uint64{id}, "another-user"); err != nil {
+			t.Fatal(err)
+		}
+		if store.headID != head {
+			t.Fatal("idempotent delete generated a misleading actor commit")
+		}
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
+	"strconv"
 )
 
 var ErrNoSuchMessage = errors.New("no such message")
@@ -111,7 +112,11 @@ func (s *Store) ListAt(snapshot Snapshot, visit func(number, id, size uint64) er
 
 // Delete merges removals into the latest tree. An ID absent from its leaf is
 // already deleted; no persistent per-message tombstone is necessary.
-func (s *Store) Delete(ids []uint64) error {
+func (s *Store) Delete(ids []uint64) error { return s.DeleteAs(ids, "") }
+
+// DeleteAs records the authenticated POP3 user in the generated commit message.
+// The username is descriptive metadata, never a Git author identity or argument.
+func (s *Store) DeleteAs(ids []uint64, username string) error {
 	ids = append([]uint64(nil), ids...)
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	for {
@@ -142,13 +147,13 @@ func (s *Store) Delete(ids []uint64) error {
 			s.mu.Unlock()
 			continue
 		}
-		err := s.deleteLocked(messages)
+		err := s.deleteLocked(messages, username)
 		s.mu.Unlock()
 		return err
 	}
 }
 
-func (s *Store) deleteLocked(messages []Message) error {
+func (s *Store) deleteLocked(messages []Message, username string) error {
 	if s.failure != nil {
 		return s.failure
 	}
@@ -173,7 +178,17 @@ func (s *Store) deleteLocked(messages []Message) error {
 	if err != nil {
 		return err
 	}
-	if err := s.commitChanges(fmt.Sprintf("mail: delete %d messages", len(paths)), next, map[string][]byte{}, paths); err != nil {
+	title := fmt.Sprintf("mail: delete %d messages", len(paths))
+	if username != "" {
+		// Preserve ordinary names verbatim. Quote names containing controls so a
+		// configured username cannot forge extra metadata lines in the commit body.
+		printable := strconv.QuoteToGraphic(username)
+		if printable == "\""+username+"\"" {
+			printable = username
+		}
+		title += "\n\nPOP3 user: " + printable
+	}
+	if err := s.commitChanges(title, next, map[string][]byte{}, paths); err != nil {
 		return err
 	}
 	s.state = next
