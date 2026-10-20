@@ -30,13 +30,18 @@ type Store struct {
 	idleGeneration uint64
 	idleTimeout    time.Duration
 	cache          *directoryCache
+	maxDailyBytes  uint64
+	reservedBytes  uint64
+	now            func() time.Time
 }
 
 // StagedMessage is a complete synced message that is not visible in the mailbox.
 type StagedMessage struct {
-	store *Store
-	path  string
-	size  uint64
+	store    *Store
+	path     string
+	size     uint64
+	reserved uint64
+	done     bool
 }
 
 // Staged is the protocol-neutral unpublished message capability.
@@ -47,7 +52,12 @@ type Staged interface {
 }
 
 // New opens the single-writer archive rooted at root.
-func New(root string) (*Store, error) {
+func New(root string) (*Store, error) { return NewWithOptions(root, Options{}) }
+
+func NewWithOptions(root string, options Options) (*Store, error) {
+	if options.MaxDailyBytes == 0 {
+		options.MaxDailyBytes = DefaultMaxDailyBytes
+	}
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("message archive root is required")
 	}
@@ -58,7 +68,7 @@ func New(root string) (*Store, error) {
 	if err := os.MkdirAll(absolute, 0o700); err != nil {
 		return nil, err
 	}
-	store := &Store{root: absolute, cache: newDirectoryCache(directoryCacheCapacity)}
+	store := &Store{root: absolute, cache: newDirectoryCache(directoryCacheCapacity), maxDailyBytes: options.MaxDailyBytes, now: time.Now}
 	if err := store.initializeGit(); err != nil {
 		_ = store.Close()
 		return nil, err
@@ -80,6 +90,26 @@ func (s *Store) Deliver(message io.Reader) (finalPath string, err error) {
 
 // Stage writes and syncs a complete message without assigning an archive ID.
 func (s *Store) Stage(message io.Reader) (Staged, error) {
+	s.mu.Lock()
+	if s.failure != nil {
+		err := s.failure
+		s.mu.Unlock()
+		return nil, err
+	}
+	if !s.canReserveLocked(minimumReceiptCharge) {
+		s.mu.Unlock()
+		return nil, ErrDailyLimit
+	}
+	staged := &StagedMessage{store: s, reserved: minimumReceiptCharge}
+	s.reservedBytes += minimumReceiptCharge
+	s.mu.Unlock()
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			_ = staged.Discard()
+		}
+	}()
+
 	tmpDir := filepath.Join(s.root, "tmp")
 	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create temporary archive directory: %w", err)
@@ -89,7 +119,7 @@ func (s *Store) Stage(message io.Reader) (Staged, error) {
 		return nil, fmt.Errorf("create temporary message: %w", err)
 	}
 	path := file.Name()
-	succeeded := false
+	staged.path = path
 	defer func() {
 		_ = file.Close()
 		if !succeeded {
@@ -97,7 +127,7 @@ func (s *Store) Stage(message io.Reader) (Staged, error) {
 		}
 	}()
 
-	written, err := io.Copy(file, message)
+	written, err := io.Copy(file, &quotaReader{source: message, message: staged})
 	if err != nil {
 		return nil, fmt.Errorf("write message: %w", err)
 	}
@@ -108,7 +138,8 @@ func (s *Store) Stage(message io.Reader) (Staged, error) {
 		return nil, fmt.Errorf("close message: %w", err)
 	}
 	succeeded = true
-	return &StagedMessage{store: s, path: path, size: uint64(written)}, nil
+	staged.size = uint64(written)
+	return staged, nil
 }
 
 // Open opens the unpublished staged content for policy inspection.
@@ -129,6 +160,15 @@ func (m *StagedMessage) Size() uint64 {
 
 // Discard removes unpublished staging data. It is safe after Publish.
 func (m *StagedMessage) Discard() error {
+	if m == nil {
+		return nil
+	}
+	m.store.mu.Lock()
+	defer m.store.mu.Unlock()
+	return m.discardLocked()
+}
+
+func (m *StagedMessage) removeFile() error {
 	if m == nil || m.path == "" {
 		return nil
 	}
@@ -151,6 +191,12 @@ func (s *Store) Publish(staged Staged) (id uint64, finalPath string, err error) 
 	if s.failure != nil {
 		return 0, "", s.failure
 	}
+	if message.done {
+		return 0, "", errors.New("staged message is no longer available")
+	}
+	if !s.canReserveLocked(0) {
+		return 0, "", ErrDailyLimit
+	}
 	if s.state.LastID == math.MaxUint64 {
 		return 0, "", errors.New("message ID space exhausted")
 	}
@@ -170,6 +216,8 @@ func (s *Store) Publish(staged Staged) (id uint64, finalPath string, err error) 
 		TotalOctets: s.state.TotalOctets + message.size,
 		Directories: cloneDirectoryCounts(s.state.Directories),
 	}
+	day, used := s.receiptUsageLocked()
+	nextState.DailyReceipt = &dailyReceipt{Day: day, ChargedBytes: used + message.reserved}
 	nextState.Directories.add(filepath.ToSlash(filepath.Dir(relativePath)))
 	nextState.index, err = buildDirectoryIndex(nextState.Directories, nextState.LastID)
 	if err != nil {
@@ -185,7 +233,7 @@ func (s *Store) Publish(staged Staged) (id uint64, finalPath string, err error) 
 		return 0, "", err
 	}
 	s.state = nextState
-	_ = message.Discard()
+	_ = message.discardLocked()
 	return nextID, finalPath, nil
 }
 

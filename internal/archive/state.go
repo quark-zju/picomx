@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 const (
@@ -15,11 +16,12 @@ const (
 )
 
 type mailboxState struct {
-	Version     int             `json:"version"`
-	LastID      uint64          `json:"last_id"`
-	TotalOctets uint64          `json:"total_octets"`
-	Directories directoryCounts `json:"directories,omitempty"`
-	index       *directoryIndex
+	Version      int             `json:"version"`
+	LastID       uint64          `json:"last_id"`
+	TotalOctets  uint64          `json:"total_octets"`
+	Directories  directoryCounts `json:"directories,omitempty"`
+	DailyReceipt *dailyReceipt   `json:"daily_receipt,omitempty"`
+	index        *directoryIndex
 }
 
 func emptyMailboxState() mailboxState {
@@ -74,6 +76,11 @@ func decodeMailboxState(source io.Reader) (mailboxState, error) {
 	}
 	if index.total == 0 && state.TotalOctets != 0 {
 		return mailboxState{}, errors.New("empty mailbox has nonzero octets")
+	}
+	if usage := state.DailyReceipt; usage != nil {
+		if _, err := time.Parse(time.DateOnly, usage.Day); err != nil || usage.ChargedBytes == 0 {
+			return mailboxState{}, errors.New("invalid daily receipt accounting")
+		}
 	}
 	state.index = index
 	return state, nil

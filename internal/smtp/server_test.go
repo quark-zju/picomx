@@ -47,6 +47,8 @@ func (m *memoryStaged) Open() (io.ReadCloser, error) {
 func (m *memoryStaged) Size() uint64   { return uint64(len(m.content)) }
 func (m *memoryStaged) Discard() error { return nil }
 
+func (d *memoryDelivery) CheckReceive() error { return nil }
+
 func (d *memoryDelivery) Stage(message io.Reader) (archive.Staged, error) {
 	content, err := io.ReadAll(message)
 	if err != nil {
@@ -337,4 +339,26 @@ func expectCode(t *testing.T, reader *bufio.Reader, want int) string {
 		t.Fatalf("response = %q, want code %d", line, want)
 	}
 	return line
+}
+
+type budgetDelivery struct{ memoryDelivery }
+
+func (*budgetDelivery) CheckReceive() error { return archive.ErrDailyLimit }
+
+func TestExhaustedBudgetRejectsBeforeDATA(t *testing.T) {
+	t.Parallel()
+	client, responses := startTestSession(t, &budgetDelivery{}, 1<<20)
+	expectCode(t, responses, 220)
+	writeLine(t, client, "EHLO sender.example")
+	for range 3 {
+		expectCode(t, responses, 250)
+	}
+	writeLine(t, client, "MAIL FROM:<sender@sender.example>")
+	expectCode(t, responses, 250)
+	writeLine(t, client, "RCPT TO:<box@mail.example>")
+	expectCode(t, responses, 250)
+	writeLine(t, client, "DATA")
+	expectCode(t, responses, 452)
+	writeLine(t, client, "QUIT")
+	expectCode(t, responses, 221)
 }

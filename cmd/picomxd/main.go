@@ -39,6 +39,7 @@ func main() {
 		pop3MaxConnsRaw   = flag.String("pop3-max-connections", getenv("PICOMX_POP3_MAX_CONNECTIONS", "16"), "maximum concurrent POP3S connections")
 		pop3IdleRaw       = flag.String("pop3-idle-timeout", getenv("PICOMX_POP3_IDLE_TIMEOUT", "10m"), "POP3 session idle timeout")
 		maxMessageRaw     = flag.String("max-message-bytes", getenv("PICOMX_MAX_MESSAGE_BYTES", "26214400"), "maximum RFC 5322 message bytes")
+		maxDailyRaw       = flag.String("max-daily-bytes", getenv("PICOMX_MAX_DAILY_BYTES", "52428800"), "daily UTC receipt budget; minimum 4 KiB charge per message")
 		maxRecipientsRaw  = flag.String("max-recipients", getenv("PICOMX_MAX_RECIPIENTS", "20"), "maximum recipients per message")
 		maxConnectionsRaw = flag.String("max-connections", getenv("PICOMX_MAX_CONNECTIONS", "64"), "maximum concurrent SMTP connections")
 		idleTimeoutRaw    = flag.String("idle-timeout", getenv("PICOMX_IDLE_TIMEOUT", "5m"), "SMTP session idle timeout")
@@ -48,6 +49,8 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	maxMessage, err := parsePositiveInt64(*maxMessageRaw)
 	exitOnError(logger, "parse max-message-bytes", err)
+	maxDaily, err := parsePositiveInt64(*maxDailyRaw)
+	exitOnError(logger, "parse max-daily-bytes", err)
 	maxRecipients, err := parsePositiveInt(*maxRecipientsRaw)
 	exitOnError(logger, "parse max-recipients", err)
 	maxConnections, err := parsePositiveInt(*maxConnectionsRaw)
@@ -90,7 +93,7 @@ func main() {
 		exitOnError(logger, "load TLS identity", errors.New("cert-dir is required when POP3S is enabled"))
 	}
 
-	store, err := archive.New(*archiveRoot)
+	store, err := archive.NewWithOptions(*archiveRoot, archive.Options{MaxDailyBytes: uint64(maxDaily)})
 	exitOnError(logger, "initialize archive", err)
 	defer store.Close()
 	smtpServer, err := smtp.NewServer(smtp.Options{

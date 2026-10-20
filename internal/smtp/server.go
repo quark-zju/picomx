@@ -38,6 +38,7 @@ var (
 
 // Delivery stages and durably publishes complete RFC 5322 messages.
 type Delivery interface {
+	CheckReceive() error
 	Stage(message io.Reader) (archive.Staged, error)
 	Publish(archive.Staged) (uint64, string, error)
 }
@@ -284,6 +285,11 @@ func (s *Server) serveConn(initialConn net.Conn) {
 				s.reply(conn, writer, 503, "5.5.1 valid MAIL and RCPT required")
 				continue
 			}
+			if err := s.delivery.CheckReceive(); err != nil {
+				s.logger.Warn("message admission failed", "remote_ip", remote, "error", err)
+				s.reply(conn, writer, 452, "4.3.1 receiving budget or storage temporarily unavailable")
+				continue
+			}
 			if !s.reply(conn, writer, 354, "end with <CRLF>.<CRLF>") {
 				return
 			}
@@ -293,6 +299,9 @@ func (s *Server) serveConn(initialConn net.Conn) {
 			staged, deliverErr := s.delivery.Stage(io.MultiReader(strings.NewReader(headers), data))
 			if deliverErr != nil {
 				code, message := 451, "4.3.0 temporary local failure"
+				if errors.Is(deliverErr, archive.ErrDailyLimit) {
+					code, message = 452, "4.3.1 daily receiving budget exceeded"
+				}
 				if errors.Is(deliverErr, errMessageTooLarge) {
 					code, message = 552, "5.3.4 message exceeds size limit"
 				}
@@ -333,7 +342,11 @@ func (s *Server) serveConn(initialConn net.Conn) {
 			if deliverErr != nil {
 				_ = staged.Discard()
 				s.logger.Warn("message publication failed", "remote_ip", remote, "error", deliverErr)
-				s.reply(conn, writer, 451, "4.3.0 temporary local failure")
+				if errors.Is(deliverErr, archive.ErrDailyLimit) {
+					s.reply(conn, writer, 452, "4.3.1 daily receiving budget exceeded")
+				} else {
+					s.reply(conn, writer, 451, "4.3.0 temporary local failure")
+				}
 				return
 			}
 			s.logger.Info("message delivered",
