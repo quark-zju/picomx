@@ -193,7 +193,17 @@ sudo -u picomx git --git-dir=/var/lib/picomx/messages ls-tree -r HEAD
 恢复协议边界，不创建正文临时文件。目录 LRU 缓存最多 64 个叶目录，每个至多 1024 封；
 以目录路径和 tree OID 为键，内容未变时可跨提交复用。`LIST` 从文件名取得大小，
 列目录、单封大小查询和读取正文均复用 reader，不启动逐次 `ls-tree` / `cat-file -s`。
-Git 只做本地操作，禁用 hooks、fsmonitor、提交签名和自动维护，不持有 Git 凭据。
+reader 和 writer 使用独立锁和空闲计时器；慢 POP3 正文传输不阻塞 SMTP 提交，等待
+reader 的删除请求也不会占用状态锁。普通 Git 操作超时为 30 秒，reader 失败后可重建，
+写入结果不确定时拒绝继续写入并要求重启。
+
+服务默认每 6 小时、或累计 256 次提交后尝试 Git 压缩；通过
+`PICOMX_GIT_MAINTENANCE_INTERVAL` / `--git-maintenance-interval` 调整周期。reader 或
+writer 正忙时延后；执行时暂停 Git 访问、关闭持久进程，再前台运行
+`git -c gc.autoDetach=false gc --prune=never`，最长 5 分钟。它将 loose objects 打入 pack
+并压缩历史，保持 HEAD、UIDL 和已删除邮件的可达历史；需要额外临时磁盘空间。
+Git 只做本地操作，禁用 hooks、fsmonitor、提交签名和隐式自动维护，不持有 Git 凭据；
+周期维护由服务协调，不创建脱离协调的后台 GC。
 systemd 的 `ProtectSystem=strict`、`ProtectHome=yes` 和出站 `connect(2)` 禁令保持不变。
 
 已有普通文件存档会在首次启动时导入 bare 仓库，保留原 `.eml` 文件供管理员确认；
@@ -213,5 +223,8 @@ sudo -u picomx git --git-dir=/var/lib/picomx/messages show COMMIT:1/07b-s456.eml
 历史，以免丢失原文和复用旧 UIDL。远程备份由服务之外的程序完成，应包含完整 Git
 历史。notmuch 如有需要，可在外部检出或导出的文件树上索引，不直接索引 bare 仓库。
 
+正常启动直接读取 HEAD 中的 state 并构建目录索引，不扫描每封邮件或查询其 blob 大小；
+仓库要求只由 picomx 一致写入。路径、响应 framing、目录列表和正文大小在使用时检查。
+如果 HEAD/ref 丢失但已有 Git 数据，拒绝重新导入旧文件，需先修复 HEAD。
 遇到 Git 事务故障后，排除磁盘或锁文件问题并重启；picomx 从 HEAD 读取权威状态。
 提交成功但响应中断时，客户端可能认为操作失败，SMTP 重试可能产生重复邮件。
