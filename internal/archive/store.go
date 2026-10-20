@@ -36,6 +36,8 @@ type Store struct {
 	idleTimeout             time.Duration
 	cache                   *directoryCache
 	maxDailyBytes           uint64
+	receiptPath             string
+	receipt                 *dailyReceipt
 	reservedBytes           uint64
 	now                     func() time.Time
 	maintenanceRequests     chan struct{}
@@ -76,8 +78,12 @@ func NewWithOptions(root string, options Options) (*Store, error) {
 	if err := os.MkdirAll(absolute, 0o700); err != nil {
 		return nil, err
 	}
-	store := &Store{root: absolute, cache: newDirectoryCache(directoryCacheCapacity), maxDailyBytes: options.MaxDailyBytes, now: time.Now, maintenanceRequests: make(chan struct{}, 1)}
+	store := &Store{root: absolute, receiptPath: absolute + ".rate-limit.json", cache: newDirectoryCache(directoryCacheCapacity), maxDailyBytes: options.MaxDailyBytes, now: time.Now, maintenanceRequests: make(chan struct{}, 1)}
 	if err := store.initializeGit(); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	if err := store.loadReceipt(); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
@@ -224,8 +230,6 @@ func (s *Store) Publish(staged Staged) (id uint64, finalPath string, err error) 
 		TotalOctets: s.state.TotalOctets + message.size,
 		Directories: cloneDirectoryCounts(s.state.Directories),
 	}
-	day, used := s.receiptUsageLocked()
-	nextState.DailyReceipt = &dailyReceipt{Day: day, ChargedBytes: used + message.reserved}
 	nextState.Directories.add(filepath.ToSlash(filepath.Dir(relativePath)))
 	nextState.index, err = buildDirectoryIndex(nextState.Directories, nextState.LastID)
 	if err != nil {
@@ -236,12 +240,21 @@ func (s *Store) Publish(staged Staged) (id uint64, finalPath string, err error) 
 	if err != nil {
 		return 0, "", err
 	}
+	// Persist the charge first: a crash or uncertain Git result may overcount
+	// this attempt, but can never publish mail without a durable budget charge.
+	day, used := s.receiptUsageLocked()
+	usage := &dailyReceipt{Day: day, ChargedBytes: used + message.reserved}
+	if err := s.writeReceipt(usage); err != nil {
+		s.failure = fmt.Errorf("persist receipt budget: %w", err)
+		return 0, "", s.failure
+	}
+	s.receipt = usage
+	_ = message.discardLocked()
 	if err := s.commitChanges(fmt.Sprintf("mail: receive %d", nextID), nextState,
 		map[string][]byte{filepath.ToSlash(relativePath): content}, nil); err != nil {
 		return 0, "", err
 	}
 	s.state = nextState
-	_ = message.discardLocked()
 	return nextID, finalPath, nil
 }
 

@@ -1,8 +1,12 @@
 package archive
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -18,10 +22,10 @@ type dailyReceipt struct {
 
 type Options struct{ MaxDailyBytes uint64 }
 
-// Clock rollback must not reset a budget that has already been committed.
+// Clock rollback must not reset a budget that has already been persisted.
 func (s *Store) receiptUsageLocked() (string, uint64) {
 	day := s.now().UTC().Format(time.DateOnly)
-	if usage := s.state.DailyReceipt; usage != nil && usage.Day >= day {
+	if usage := s.receipt; usage != nil && usage.Day >= day {
 		return usage.Day, usage.ChargedBytes
 	}
 	return day, 0
@@ -82,4 +86,68 @@ func (m *StagedMessage) discardLocked() error {
 		m.done = true
 	}
 	return m.removeFile()
+}
+
+// The receipt file is a sibling of the bare repository, outside both its Git
+// tree and its object database. Git cloning or rolling back HEAD cannot reset it.
+func (s *Store) loadReceipt() error {
+	file, err := os.Open(s.receiptPath)
+	if errors.Is(err, os.ErrNotExist) {
+		// Read compatibility for the previous Git-backed counter. Transfer once;
+		// after this, only the sibling file is authoritative, even across HEAD changes.
+		if legacy := s.state.DailyReceipt; legacy != nil {
+			if err := s.writeReceipt(legacy); err != nil {
+				return err
+			}
+			s.receipt = legacy
+		}
+	} else if err != nil {
+		return fmt.Errorf("open receipt budget: %w", err)
+	} else {
+		defer file.Close()
+		decoder := json.NewDecoder(file)
+		decoder.DisallowUnknownFields()
+		var usage dailyReceipt
+		if err := decoder.Decode(&usage); err != nil {
+			return fmt.Errorf("decode receipt budget: %w", err)
+		}
+		if err := ensureJSONEOF(decoder); err != nil {
+			return err
+		}
+		if err := validateReceipt(&usage); err != nil {
+			return err
+		}
+		s.receipt = &usage
+	}
+	s.state.DailyReceipt = nil
+	return nil
+}
+
+func validateReceipt(usage *dailyReceipt) error {
+	if _, err := time.Parse(time.DateOnly, usage.Day); err != nil || usage.ChargedBytes == 0 {
+		return errors.New("invalid daily receipt accounting")
+	}
+	return nil
+}
+
+func (s *Store) writeReceipt(usage *dailyReceipt) (err error) {
+	dir := filepath.Dir(s.receiptPath)
+	file, err := os.CreateTemp(dir, "."+filepath.Base(s.receiptPath)+"-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close(); _ = os.Remove(file.Name()) }()
+	if err := json.NewEncoder(file).Encode(usage); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(file.Name(), s.receiptPath); err != nil {
+		return err
+	}
+	return syncDirectory(dir)
 }

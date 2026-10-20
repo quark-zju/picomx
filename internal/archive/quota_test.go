@@ -1,8 +1,12 @@
 package archive
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -30,7 +34,7 @@ func TestReceiptBudgetPersistsAcrossDeleteRestartAndClockRollback(t *testing.T) 
 	if err := store.Delete([]uint64{1, 2}); err != nil {
 		t.Fatal(err)
 	}
-	if store.state.DailyReceipt.ChargedBytes != 8192 {
+	if store.receipt.ChargedBytes != 8192 {
 		t.Fatal("delete refunded receipt budget")
 	}
 	reopened, err := NewWithOptions(root, Options{MaxDailyBytes: 8192})
@@ -50,8 +54,8 @@ func TestReceiptBudgetPersistsAcrossDeleteRestartAndClockRollback(t *testing.T) 
 	if _, err := reopened.Deliver(strings.NewReader("next day")); err != nil {
 		t.Fatal(err)
 	}
-	if reopened.state.DailyReceipt.Day != "2026-10-21" || reopened.state.DailyReceipt.ChargedBytes != 4096 {
-		t.Fatalf("new day accounting: %+v", reopened.state.DailyReceipt)
+	if reopened.receipt.Day != "2026-10-21" || reopened.receipt.ChargedBytes != 4096 {
+		t.Fatalf("new day accounting: %+v", reopened.receipt)
 	}
 }
 
@@ -106,13 +110,13 @@ func TestConcurrentStagingReservationsAndDiscard(t *testing.T) {
 	if _, err := store.Stage(strings.NewReader(strings.Repeat("x", 8193))); !errors.Is(err, ErrDailyLimit) {
 		t.Fatalf("oversize stream: %v", err)
 	}
-	if store.reservedBytes != 0 || store.state.DailyReceipt != nil {
+	if store.reservedBytes != 0 || store.receipt != nil {
 		t.Fatal("failed staging consumed committed budget")
 	}
 	if _, err := store.Deliver(strings.NewReader(strings.Repeat("x", 8192))); err != nil {
 		t.Fatal(err)
 	}
-	if store.state.DailyReceipt.ChargedBytes != 8192 {
+	if store.receipt.ChargedBytes != 8192 {
 		t.Fatal("large message charged incorrectly")
 	}
 }
@@ -141,8 +145,8 @@ func TestStagingAcrossMidnightUsesCurrentBudgetAndCannotPublishTwice(t *testing.
 	if _, _, err := store.Publish(staged); err == nil {
 		t.Fatal("republished discarded stage")
 	}
-	if store.state.DailyReceipt.Day != "2026-10-21" || store.state.DailyReceipt.ChargedBytes != 8192 {
-		t.Fatalf("midnight budget: %+v", store.state.DailyReceipt)
+	if store.receipt.Day != "2026-10-21" || store.receipt.ChargedBytes != 8192 {
+		t.Fatalf("midnight budget: %+v", store.receipt)
 	}
 }
 
@@ -164,3 +168,173 @@ func TestFailedStageReleasesReservation(t *testing.T) {
 type errorReader struct{}
 
 func (errorReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+func TestReceiptFileIsOutsideGitAndSurvivesHEADRollback(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	store, err := NewWithOptions(root, Options{MaxDailyBytes: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	initial := store.headID
+	for range 2 {
+		if _, err := store.Deliver(strings.NewReader("body")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if store.receiptPath != root+".rate-limit.json" {
+		t.Fatalf("unexpected receipt path: %s", store.receiptPath)
+	}
+	raw, err := os.ReadFile(store.receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var usage dailyReceipt
+	if err := json.Unmarshal(raw, &usage); err != nil || usage.ChargedBytes != 8192 {
+		t.Fatalf("file usage = %s, %v", raw, err)
+	}
+	info, err := os.Stat(store.receiptPath)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("receipt permissions: %v/%v", info, err)
+	}
+	state, err := store.git(nil, "show", "HEAD:state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(state, []byte("daily_receipt")) || bytes.Contains(state, []byte("charged_bytes")) {
+		t.Fatalf("quota leaked into Git state: %s", state)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately simulate an administrator restoring an older HEAD. Only the
+	// budget assertion matters here; production history must remain append-only.
+	if _, err := store.git(nil, "update-ref", "refs/heads/main", initial); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewWithOptions(root, Options{MaxDailyBytes: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := reopened.CheckReceive(); !errors.Is(err, ErrDailyLimit) {
+		t.Fatalf("HEAD rollback reset external quota: %v", err)
+	}
+}
+
+func TestFailedGitPublicationKeepsDurableBudgetCharge(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	store, err := NewWithOptions(root, Options{MaxDailyBytes: 4096})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	head := store.headID
+	lock := filepath.Join(root, "refs", "heads", "main.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver(strings.NewReader("failed")); err == nil {
+		t.Fatal("published despite ref lock")
+	}
+	if store.headID != head || store.receipt.ChargedBytes != 4096 || store.reservedBytes != 0 {
+		t.Fatal("failed publication lost charge or left reservation")
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewWithOptions(root, Options{MaxDailyBytes: 4096})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if reopened.Snapshot().Count() != 0 {
+		t.Fatal("failed publication changed mailbox")
+	}
+	if err := reopened.CheckReceive(); !errors.Is(err, ErrDailyLimit) {
+		t.Fatalf("failed publication charge was not durable: %v", err)
+	}
+}
+
+func TestReceiptFileFailurePreventsGitPublication(t *testing.T) {
+	t.Parallel()
+	store, err := NewWithOptions(t.TempDir(), Options{MaxDailyBytes: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	head := store.headID
+	// A directory at the target makes atomic replacement fail deterministically,
+	// including when tests run as root and chmod cannot simulate a write failure.
+	if err := os.Mkdir(store.receiptPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver(strings.NewReader("blocked")); err == nil {
+		t.Fatal("published without persisting the charge")
+	}
+	if store.headID != head || store.Snapshot().Count() != 0 || store.reservedBytes != 0 {
+		t.Fatal("quota file error changed Git state or leaked reservation")
+	}
+	if err := store.CheckReceive(); err == nil {
+		t.Fatal("continued after uncertain quota file update")
+	}
+}
+
+func TestGitBackedReceiptTransfersOnceToExternalFile(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	store, err := testNew(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	day := time.Now().UTC().Format(time.DateOnly)
+	legacy := store.state
+	legacy.DailyReceipt = &dailyReceipt{Day: day, ChargedBytes: 8192}
+	if err := store.commitChanges("mail: legacy quota fixture", legacy, map[string][]byte{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewWithOptions(root, Options{MaxDailyBytes: 12288})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if reopened.receipt == nil || reopened.receipt.ChargedBytes != 8192 || reopened.state.DailyReceipt != nil {
+		t.Fatal("legacy quota was not transferred")
+	}
+	if _, err := reopened.Deliver(strings.NewReader("last")); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := NewWithOptions(root, Options{MaxDailyBytes: 12288})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = again.Close() })
+	if again.receipt.ChargedBytes != 12288 {
+		t.Fatal("external usage was replaced with old Git usage")
+	}
+	if err := again.CheckReceive(); !errors.Is(err, ErrDailyLimit) {
+		t.Fatalf("transfer reset budget: %v", err)
+	}
+}
+
+func TestInvalidReceiptFileRejectsStartup(t *testing.T) {
+	t.Parallel()
+	for _, content := range []string{"", `{}`, `{"day":"bad","charged_bytes":1}`, `{"day":"2026-10-20","charged_bytes":0}`, `{"day":"2026-10-20","charged_bytes":1} {}`} {
+		root := t.TempDir()
+		if err := os.WriteFile(root+".rate-limit.json", []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if store, err := New(root); err == nil {
+			_ = store.Close()
+			t.Fatalf("accepted invalid receipt file %q", content)
+		}
+	}
+}
