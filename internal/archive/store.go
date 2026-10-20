@@ -15,29 +15,32 @@ import (
 
 // Store writes immutable messages under deterministic, sequential ID paths.
 type Store struct {
-	root               string
-	mu                 sync.Mutex
-	state              mailboxState
-	headID             string
-	failure            error
-	refName            string
-	gitMu              sync.Mutex
-	readMu             sync.Mutex
-	readClosed         bool
-	readIdleTimer      *time.Timer
-	readIdleGeneration uint64
-	readIdleTimeout    time.Duration
-	importer           *gitProcess
-	reader             *gitProcess
-	importError        error
-	closed             bool
-	idleTimer          *time.Timer
-	idleGeneration     uint64
-	idleTimeout        time.Duration
-	cache              *directoryCache
-	maxDailyBytes      uint64
-	reservedBytes      uint64
-	now                func() time.Time
+	root                    string
+	mu                      sync.Mutex
+	state                   mailboxState
+	headID                  string
+	failure                 error
+	refName                 string
+	gitMu                   sync.Mutex
+	readMu                  sync.Mutex
+	readClosed              bool
+	readIdleTimer           *time.Timer
+	readIdleGeneration      uint64
+	readIdleTimeout         time.Duration
+	importer                *gitProcess
+	reader                  *gitProcess
+	importError             error
+	closed                  bool
+	idleTimer               *time.Timer
+	idleGeneration          uint64
+	idleTimeout             time.Duration
+	cache                   *directoryCache
+	maxDailyBytes           uint64
+	reservedBytes           uint64
+	now                     func() time.Time
+	maintenanceRequests     chan struct{}
+	commitsSinceMaintenance uint64
+	lastMaintenanceHead     string
 }
 
 // StagedMessage is a complete synced message that is not visible in the mailbox.
@@ -73,7 +76,7 @@ func NewWithOptions(root string, options Options) (*Store, error) {
 	if err := os.MkdirAll(absolute, 0o700); err != nil {
 		return nil, err
 	}
-	store := &Store{root: absolute, cache: newDirectoryCache(directoryCacheCapacity), maxDailyBytes: options.MaxDailyBytes, now: time.Now}
+	store := &Store{root: absolute, cache: newDirectoryCache(directoryCacheCapacity), maxDailyBytes: options.MaxDailyBytes, now: time.Now, maintenanceRequests: make(chan struct{}, 1)}
 	if err := store.initializeGit(); err != nil {
 		_ = store.Close()
 		return nil, err

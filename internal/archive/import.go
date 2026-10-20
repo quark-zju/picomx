@@ -219,6 +219,13 @@ func (s *Store) commitChanges(title string, state mailboxState, changes map[stri
 		s.failure = s.abortImporterLocked(err)
 		return s.failure
 	}
+	s.commitsSinceMaintenance++
+	if s.commitsSinceMaintenance >= maintenanceCommitThreshold {
+		select {
+		case s.maintenanceRequests <- struct{}{}:
+		default:
+		}
+	}
 	return nil
 }
 

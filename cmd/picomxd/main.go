@@ -38,6 +38,7 @@ func main() {
 		pop3PasswordHash  = flag.String("pop3-password-sha256", getenv("PICOMX_POP3_PASSWORD_SHA256", ""), "POP3 app-password SHA-256")
 		pop3MaxConnsRaw   = flag.String("pop3-max-connections", getenv("PICOMX_POP3_MAX_CONNECTIONS", "16"), "maximum concurrent POP3S connections")
 		pop3IdleRaw       = flag.String("pop3-idle-timeout", getenv("PICOMX_POP3_IDLE_TIMEOUT", "10m"), "POP3 session idle timeout")
+		gitMaintenanceRaw = flag.String("git-maintenance-interval", getenv("PICOMX_GIT_MAINTENANCE_INTERVAL", "6h"), "maximum interval between coordinated Git maintenance attempts")
 		maxMessageRaw     = flag.String("max-message-bytes", getenv("PICOMX_MAX_MESSAGE_BYTES", "26214400"), "maximum RFC 5322 message bytes")
 		maxDailyRaw       = flag.String("max-daily-bytes", getenv("PICOMX_MAX_DAILY_BYTES", "52428800"), "daily UTC receipt budget; minimum 4 KiB charge per message")
 		maxRecipientsRaw  = flag.String("max-recipients", getenv("PICOMX_MAX_RECIPIENTS", "20"), "maximum recipients per message")
@@ -49,6 +50,11 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	maxMessage, err := parsePositiveInt64(*maxMessageRaw)
 	exitOnError(logger, "parse max-message-bytes", err)
+	maintenanceInterval, err := time.ParseDuration(*gitMaintenanceRaw)
+	exitOnError(logger, "parse git-maintenance-interval", err)
+	if maintenanceInterval <= 0 {
+		exitOnError(logger, "parse git-maintenance-interval", errors.New("must be greater than zero"))
+	}
 	maxDaily, err := parsePositiveInt64(*maxDailyRaw)
 	exitOnError(logger, "parse max-daily-bytes", err)
 	maxRecipients, err := parsePositiveInt(*maxRecipientsRaw)
@@ -123,6 +129,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	maintenanceDone := make(chan struct{})
+	go func() { defer close(maintenanceDone); store.RunMaintenance(ctx, maintenanceInterval, logger) }()
+	defer func() { stop(); <-maintenanceDone }()
 	if certificateManager != nil {
 		go certificateManager.RunReloadLoop(ctx, tlsReloadInterval)
 	}
