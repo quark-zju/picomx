@@ -48,6 +48,7 @@ type gitProcess struct {
 	output      *bufio.Reader
 	diagnostics gitDiagnostics
 	nextMark    uint64
+	timeout     time.Duration
 }
 
 func (s *Store) importerLocked() (*gitProcess, error) {
@@ -120,7 +121,7 @@ func (s *Store) closeImporterLocked() error {
 	process := s.importer
 	s.importer = nil
 	closeErr := process.stdin.Close()
-	waitErr := process.cmd.Wait()
+	waitErr := process.watch(process.cmd.Wait)
 	if waitErr != nil {
 		return fmt.Errorf("close git fast-import: %w: %s", waitErr, process.diagnostics.String())
 	}
@@ -133,7 +134,7 @@ func (s *Store) abortImporterLocked(cause error) error {
 	if s.importer != nil {
 		process := s.importer
 		s.importer = nil
-		_ = process.cmd.Process.Kill()
+		killGit(process.cmd)
 		_ = process.stdin.Close()
 		_ = process.cmd.Wait()
 		cause = fmt.Errorf("%w: %s", cause, process.diagnostics.String())
@@ -214,7 +215,7 @@ func (s *Store) commitChanges(title string, state mailboxState, changes map[stri
 		return err
 	}
 	// Any protocol error poisons this store, requiring a fresh load of HEAD.
-	if err := s.importCommitLocked(process, title, state, changes, removals); err != nil {
+	if err := process.watch(func() error { return s.importCommitLocked(process, title, state, changes, removals) }); err != nil {
 		s.failure = s.abortImporterLocked(err)
 		return s.failure
 	}

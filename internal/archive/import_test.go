@@ -2,10 +2,12 @@ package archive
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -258,5 +260,62 @@ func TestWaitingDeletionDoesNotBlockReceipt(t *testing.T) {
 	}
 	if snapshot := store.Snapshot(); snapshot.Count() != 1 || snapshot.LastID != 2 {
 		t.Fatalf("concurrent receipt was overwritten: %+v", snapshot)
+	}
+}
+
+func TestGitTimeoutStopsStalledProcesses(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"reader", "writer"} {
+		t.Run(kind, func(t *testing.T) {
+			store, err := testNew(t, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Deliver(strings.NewReader("accepted")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Lookup(store.Snapshot(), 1); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "reader" {
+				store.readMu.Lock()
+				store.reader.timeout = 30 * time.Millisecond
+				err = syscall.Kill(-store.reader.cmd.Process.Pid, syscall.SIGSTOP)
+				store.readMu.Unlock()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.Lookup(store.Snapshot(), 1); !errors.Is(err, ErrGitTimeout) {
+					t.Fatalf("stalled reader: %v", err)
+				}
+				if _, err := store.Deliver(strings.NewReader("next")); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.Lookup(store.Snapshot(), 2); err != nil {
+					t.Fatalf("reader did not restart: %v", err)
+				}
+			} else {
+				store.gitMu.Lock()
+				store.importer.timeout = 30 * time.Millisecond
+				err = syscall.Kill(-store.importer.cmd.Process.Pid, syscall.SIGSTOP)
+				store.gitMu.Unlock()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.Deliver(strings.NewReader("uncertain")); !errors.Is(err, ErrGitTimeout) {
+					t.Fatalf("stalled writer: %v", err)
+				}
+				if _, err := store.Deliver(strings.NewReader("blocked")); err == nil {
+					t.Fatal("continued after uncertain publication")
+				}
+				reopened, err := testNew(t, store.root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if reopened.Snapshot().Count() != 1 {
+					t.Fatal("timeout changed accepted mailbox")
+				}
+			}
+		})
 	}
 }

@@ -2,6 +2,7 @@ package archive
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
 
 func (s *Store) gitCommand(args ...string) *exec.Cmd {
@@ -19,6 +22,7 @@ func (s *Store) gitCommand(args ...string) *exec.Cmd {
 		"-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
 		"-c", "core.fsync=committed", "-c", "core.fsyncMethod=fsync"}
 	cmd := exec.Command("git", append(options, args...)...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	for _, variable := range os.Environ() {
 		if !strings.HasPrefix(variable, "GIT_") {
 			cmd.Env = append(cmd.Env, variable)
@@ -33,11 +37,18 @@ func (s *Store) gitCommand(args ...string) *exec.Cmd {
 }
 
 func (s *Store) git(input io.Reader, args ...string) ([]byte, error) {
+	return s.runGit(context.Background(), gitOperationTimeout, input, args...)
+}
+
+func (s *Store) runGit(ctx context.Context, timeout time.Duration, input io.Reader, args ...string) ([]byte, error) {
 	cmd := s.gitCommand(args...)
 	cmd.Stdin = input
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	if err := watchGit(ctx, cmd, timeout, cmd.Wait); err != nil {
 		return nil, fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil

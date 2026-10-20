@@ -58,7 +58,7 @@ func (s *Store) closeReaderLocked() error {
 	process := s.reader
 	s.reader = nil
 	closeErr := process.stdin.Close()
-	if err := process.cmd.Wait(); err != nil {
+	if err := process.watch(process.cmd.Wait); err != nil {
 		return fmt.Errorf("close git cat-file: %w: %s", err, process.diagnostics.String())
 	}
 	return closeErr
@@ -68,7 +68,7 @@ func (s *Store) abortReaderLocked(cause error) error {
 	if s.reader != nil {
 		process := s.reader
 		s.reader = nil
-		_ = process.cmd.Process.Kill()
+		killGit(process.cmd)
 		_ = process.stdin.Close()
 		_ = process.cmd.Wait()
 		return fmt.Errorf("%w: %s", cause, process.diagnostics.String())
@@ -76,7 +76,16 @@ func (s *Store) abortReaderLocked(cause error) error {
 	return cause
 }
 
-func (process *gitProcess) queryObject(command, spec, kind string) (objectHeader, error) {
+func (process *gitProcess) queryObject(command, spec, kind string) (header objectHeader, err error) {
+	err = process.watch(func() error {
+		var queryErr error
+		header, queryErr = process.queryObjectInner(command, spec, kind)
+		return queryErr
+	})
+	return header, err
+}
+
+func (process *gitProcess) queryObjectInner(command, spec, kind string) (objectHeader, error) {
 	if strings.ContainsAny(spec, "\r\n") {
 		return objectHeader{}, errors.New("invalid Git object query")
 	}
@@ -171,7 +180,8 @@ func (reader *blobReader) Read(buffer []byte) (int, error) {
 	if int64(len(buffer)) > reader.remaining {
 		buffer = buffer[:reader.remaining]
 	}
-	n, err := reader.process.output.Read(buffer)
+	var n int
+	err := reader.process.watch(func() error { var readErr error; n, readErr = reader.process.output.Read(buffer); return readErr })
 	reader.remaining -= int64(n)
 	if errors.Is(err, io.EOF) && reader.remaining > 0 {
 		err = io.ErrUnexpectedEOF
@@ -186,14 +196,17 @@ func (reader *blobReader) Close() error {
 	reader.closed = true
 	defer reader.store.readMu.Unlock()
 	defer reader.store.armReadIdleLocked()
-	_, err := io.CopyN(io.Discard, reader.process.output, reader.remaining)
-	if err == nil {
-		var end byte
-		end, err = reader.process.output.ReadByte()
-		if err == nil && end != '\n' {
-			err = errors.New("invalid git object terminator")
+	err := reader.process.watch(func() error {
+		_, err := io.CopyN(io.Discard, reader.process.output, reader.remaining)
+		if err == nil {
+			var end byte
+			end, err = reader.process.output.ReadByte()
+			if err == nil && end != '\n' {
+				err = errors.New("invalid git object terminator")
+			}
 		}
-	}
+		return err
+	})
 	if err != nil {
 		reader.closeError = reader.store.abortReaderLocked(err)
 	}
