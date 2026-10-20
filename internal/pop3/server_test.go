@@ -552,3 +552,28 @@ func TestFullListUsesBatchMetadata(t *testing.T) {
 	writeLine(t, client, "QUIT")
 	expectLine(t, responses, "+OK bye")
 }
+
+func TestMalformedPasswordCommandsDoNotLeakIntoLogs(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	server, err := NewServer(Options{Hostname: "pop.example.com", Mailbox: fakeMailbox{}, Credentials: testCredentials(t, "alice", "super-secret"), Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, responses := startSession(t, server)
+	expectLine(t, responses, "+OK pop.example.com picomx ready")
+	for _, command := range []string{"PASS\tsuper-secret", "PASS\vsuper-secret", "PASS\u00a0super-secret", "PASS\rsuper-secret", "PASS\tsuper-secret extra-secret"} {
+		writeLine(t, client, command)
+		expectLine(t, responses, "-ERR command not implemented")
+	}
+	login(t, client, responses, "alice", "super-secret")
+	writeLine(t, client, "QUIT")
+	expectLine(t, responses, "+OK bye")
+	output := strings.ToLower(logs.String())
+	if strings.Contains(output, "super-secret") || strings.Contains(output, "extra-secret") {
+		t.Fatalf("malformed command leaked password: %s", output)
+	}
+	if !strings.Contains(output, `"command":"unknown"`) {
+		t.Fatal("unknown commands were not logged safely")
+	}
+}

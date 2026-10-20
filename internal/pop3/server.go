@@ -157,10 +157,10 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 			"protocol", "pop3",
 			"client_ip", remoteIP,
 			"tls_version", tlsVersion,
-			"command", command,
+			"command", loggedCommand(command),
 		}
 		// Never include the PASS argument in logs; it contains the app password.
-		if command != "PASS" && argument != "" {
+		if command != "PASS" && loggedCommand(command) != "UNKNOWN" && argument != "" {
 			logAttrs = append(logAttrs, "argument", argument)
 		}
 		s.logger.Info("POP3 command", logAttrs...)
@@ -386,6 +386,17 @@ func readCommand(reader *bufio.Reader) (string, error) {
 		return "", err
 	}
 	return strings.TrimSuffix(strings.TrimSuffix(string(line), "\n"), "\r"), nil
+}
+
+// Unknown tokens may contain a malformed PASS and its password. Only emit
+// canonical protocol verbs; never echo unrecognized command text to the log.
+func loggedCommand(command string) string {
+	switch command {
+	case "CAPA", "USER", "PASS", "STAT", "LIST", "UIDL", "RETR", "TOP", "DELE", "RSET", "NOOP", "QUIT":
+		return command
+	default:
+		return "UNKNOWN"
+	}
 }
 
 func splitCommand(line string) (string, string) {
