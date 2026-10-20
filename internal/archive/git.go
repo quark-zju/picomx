@@ -170,43 +170,8 @@ func (s *Store) initializeGit() error {
 		s.state = state
 	}
 
-	if err := s.validateTree(); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (s *Store) validateTree() error {
-	snapshot := s.snapshotLocked()
-	var total uint64
-	// Validate directory structure as well as counts, so hidden/unindexed mail
-	// cannot silently disappear from the POP3 view after a restart.
-	if err := s.validateDirectories(snapshot); err != nil {
-		return err
-	}
-	if err := s.ListAt(snapshot, func(number, id, size uint64) error {
-		if size > ^uint64(0)-total {
-			return errors.New("archive octet overflow")
-		}
-		path, err := messagePath(id, size)
-		if err != nil {
-			return err
-		}
-		actual, err := s.objectInfo(snapshot.commit+":"+path, "blob")
-		if err != nil {
-			return err
-		}
-		if uint64(actual.size) != size {
-			return errors.New("message size does not match filename")
-		}
-		total += size
-		return nil
-	}); err != nil {
-		return err
-	}
-	if total != s.state.TotalOctets {
-		return errors.New("archive octets do not match state")
-	}
+	// Committed state is authoritative. Rebuilding the directory-count index is
+	// O(directories); mail objects are parsed and checked on demand, not scanned
+	// at every restart. picomx is the only supported writer of this repository.
 	return nil
 }

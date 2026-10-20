@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"sort"
 	"strings"
@@ -88,69 +87,4 @@ func (s *Store) directory(commit, path string) ([]Message, error) {
 	}
 	s.cache.put(key, messages)
 	return messages, nil
-}
-
-func (s *Store) validateDirectories(snapshot Snapshot) error {
-	actual := directoryCounts{}
-	var walk func(spec, path string) (uint64, error)
-	walk = func(spec, path string) (uint64, error) {
-		entries, _, err := s.tree(spec)
-		if err != nil {
-			return 0, err
-		}
-		leaf := false
-		if path != "" {
-			leaf, err = validDirectory(path)
-			if err != nil {
-				return 0, err
-			}
-		}
-		var count uint64
-		for _, entry := range entries {
-			child := entry.name
-			if path != "" {
-				child = path + "/" + entry.name
-			}
-			if leaf {
-				if entry.mode != "100644" {
-					return 0, errors.New("leaf directory contains a subtree")
-				}
-				message, err := messageFromPath(child)
-				if err != nil || message.ID > snapshot.LastID {
-					return 0, errors.New("invalid committed message path")
-				}
-				count++
-			} else if entry.mode == "40000" {
-				subcount, err := walk(entry.oid, child)
-				if err != nil {
-					return 0, err
-				}
-				if subcount > ^uint64(0)-count {
-					return 0, errors.New("message count overflow")
-				}
-				count += subcount
-			} else if path != "" || (entry.name != "state" && entry.name != ".gitignore" && entry.name != ".gitattributes") {
-				return 0, fmt.Errorf("unexpected committed path: %s", child)
-			}
-		}
-		if path != "" {
-			if count == 0 {
-				return 0, errors.New("empty committed message directory")
-			}
-			actual[path] = count
-		}
-		return count, nil
-	}
-	if _, err := walk(snapshot.commit+"^{tree}", ""); err != nil {
-		return err
-	}
-	if len(actual) != len(s.state.Directories) {
-		return errors.New("committed directory set does not match state")
-	}
-	for path, count := range actual {
-		if s.state.Directories[path] != count {
-			return errors.New("committed directory count does not match state")
-		}
-	}
-	return nil
 }

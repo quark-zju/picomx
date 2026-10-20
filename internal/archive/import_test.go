@@ -198,6 +198,9 @@ func TestReaderCrashCanRestartWithoutPoisoningWriter(t *testing.T) {
 	if _, err := store.Deliver(strings.NewReader("first")); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.Lookup(store.Snapshot(), 1); err != nil {
+		t.Fatal(err)
+	}
 	store.readMu.Lock()
 	err = store.reader.cmd.Process.Kill()
 	store.readMu.Unlock()

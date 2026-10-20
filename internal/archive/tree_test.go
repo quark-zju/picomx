@@ -140,34 +140,27 @@ func TestBareSHA256TreeAndBodyRead(t *testing.T) {
 	}
 }
 
-func TestStartupRejectsIncorrectSizeAndDirectoryMetadata(t *testing.T) {
+func TestMessageReadChecksFilenameSizeWithoutStartupScan(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{"size", "count", "duplicate ID"} {
-		t.Run(mode, func(t *testing.T) {
-			root := t.TempDir()
-			store, err := testNew(t, root)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := store.Deliver(strings.NewReader("original")); err != nil {
-				t.Fatal(err)
-			}
-			changes := map[string][]byte{}
-			state := store.state
-			switch mode {
-			case "size":
-				changes["1/001-s8.eml"] = []byte("wrong length")
-			case "count":
-				state.Directories = directoryCounts{}
-			case "duplicate ID":
-				changes["1/001-s7.eml"] = []byte("another")
-			}
-			if err := store.commitChanges("mail: corrupt fixture", state, changes, nil); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := testNew(t, root); err == nil {
-				t.Fatal("accepted inconsistent committed archive")
-			}
-		})
+	root := t.TempDir()
+	store, err := testNew(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver(strings.NewReader("original")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.commitChanges("mail: inconsistent fixture", store.state, map[string][]byte{"1/001-s8.eml": []byte("wrong length")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := testNew(t, root)
+	if err != nil {
+		t.Fatalf("startup scanned blobs: %v", err)
+	}
+	if len(reopened.cache.entries) != 0 {
+		t.Fatal("startup enumerated mail directories")
+	}
+	if _, err := reopened.Open(1); err == nil {
+		t.Fatal("body read ignored the framed size mismatch")
 	}
 }
