@@ -28,7 +28,7 @@ func main() {
 		hostname          = flag.String("hostname", getenv("PICOMX_HOSTNAME", ""), "SMTP MX hostname")
 		pop3Hostname      = flag.String("pop3-hostname", getenv("PICOMX_POP3_HOSTNAME", ""), "POP3S service hostname; defaults to SMTP hostname")
 		domainsRaw        = flag.String("domains", getenv("PICOMX_DOMAINS", ""), "comma-separated recipient domains")
-		archiveRoot       = flag.String("archive-root", getenv("PICOMX_ARCHIVE_ROOT", "/var/lib/picomx/messages"), "append-only message archive")
+		archiveRoot       = flag.String("archive-root", getenv("PICOMX_ARCHIVE_ROOT", "/var/lib/picomx/messages"), "bare Git message archive")
 		listenAddress     = flag.String("listen", getenv("PICOMX_LISTEN", ""), "TCP address for development; default uses systemd socket activation")
 		pop3ListenAddress = flag.String("pop3-listen", getenv("PICOMX_POP3_LISTEN", ""), "POP3S TCP address for development")
 		certificateDir    = flag.String("cert-dir", getenv("PICOMX_CERT_DIR", ""), "directory containing hostname/fullchain.pem and privkey.pem")
@@ -92,6 +92,7 @@ func main() {
 
 	store, err := archive.New(*archiveRoot)
 	exitOnError(logger, "initialize archive", err)
+	defer store.Close()
 	smtpServer, err := smtp.NewServer(smtp.Options{
 		Hostname:       *hostname,
 		Domains:        splitDomains(*domainsRaw),

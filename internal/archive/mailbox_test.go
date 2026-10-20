@@ -12,18 +12,18 @@ import (
 func TestMailboxSnapshotOpenAndSize(t *testing.T) {
 	t.Parallel()
 
-	store, err := New(t.TempDir())
+	store, err := testNew(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := store.Snapshot(); got != (Snapshot{}) {
+	if got := store.Snapshot(); got.Count() != 0 || got.TotalOctets != 0 {
 		t.Fatalf("empty snapshot = %+v", got)
 	}
 	message := "Header: value\r\n\r\nbody\r\n"
 	if _, err := store.Deliver(strings.NewReader(message)); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := store.Snapshot(), (Snapshot{LastID: 1, TotalOctets: uint64(len(message))}); got != want {
+	if got, want := store.Snapshot(), (Snapshot{LastID: 1, TotalOctets: uint64(len(message))}); got.LastID != want.LastID || got.Count() != want.LastID || got.TotalOctets != want.TotalOctets {
 		t.Fatalf("snapshot = %+v, want %+v", got, want)
 	}
 	if got, err := store.Size(1); err != nil || got != uint64(len(message)) {
@@ -46,7 +46,7 @@ func TestMailboxSnapshotOpenAndSize(t *testing.T) {
 func TestMailboxRejectsIDsOutsideSnapshot(t *testing.T) {
 	t.Parallel()
 
-	store, err := New(t.TempDir())
+	store, err := testNew(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,32 +60,36 @@ func TestMailboxRejectsIDsOutsideSnapshot(t *testing.T) {
 	}
 }
 
-func TestMailboxRejectsSymlinkMessage(t *testing.T) {
+func TestMailboxReadsCommittedBlobInsteadOfUntrackedFiles(t *testing.T) {
 	t.Parallel()
-
 	root := t.TempDir()
-	store, err := New(root)
+	store, err := testNew(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path, err := store.Deliver(strings.NewReader("message"))
-	if err != nil {
+	if _, err := store.Deliver(strings.NewReader("message")); err != nil {
 		t.Fatal(err)
 	}
 	target := filepath.Join(root, "target")
 	if err := os.WriteFile(target, []byte("replacement"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(path); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "1"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, path); err != nil {
+	if err := os.Symlink(target, filepath.Join(root, "1", "001.eml")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Open(1); err == nil {
-		t.Fatal("Open accepted symlink message")
+	file, err := store.Open(1)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := store.Size(1); err == nil {
-		t.Fatal("Size accepted symlink message")
+	defer file.Close()
+	content, err := io.ReadAll(file)
+	if err != nil || string(content) != "message" {
+		t.Fatalf("committed content = %q, %v", content, err)
+	}
+	if size, err := store.Size(1); err != nil || size != 7 {
+		t.Fatalf("committed size = %d, %v", size, err)
 	}
 }

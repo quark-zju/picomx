@@ -19,7 +19,7 @@ FAIL2BAN_JAIL_DIR ?= /etc/fail2ban/jail.d
 CERT_DIR ?= /etc/picosrv/certs
 SUDO ?= sudo
 
-.PHONY: build test fmt config install setup-user install-config install-systemd override-systemd install-fail2ban facl deploy deploy-fail2ban
+.PHONY: build test fmt config install setup-user install-config install-systemd override-systemd install-fail2ban facl deploy deploy-fail2ban check-git
 
 build:
 	go build -o $(BINARY) $(BUILD_TARGET)
@@ -36,7 +36,13 @@ config:
 	fi
 	EDITOR="$${EDITOR:-vim}" sh -c '"$$EDITOR" "$(CUSTOM_POLICY)"'
 
-install: build
+check-git:
+	@if ! command -v git >/dev/null 2>&1; then \
+		echo "Git 2.36 or newer is required; install git first" >&2; \
+		exit 1; \
+	fi
+
+install: check-git build
 	$(SUDO) install -m 755 $(BINARY) $(INSTALL_PATH)
 
 setup-user:

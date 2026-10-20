@@ -3,6 +3,7 @@ package archive
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -14,7 +15,7 @@ func TestReadMailboxStateTreatsMissingFileAsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state != emptyMailboxState() {
+	if !reflect.DeepEqual(state, emptyMailboxState()) {
 		t.Fatalf("state = %+v, want %+v", state, emptyMailboxState())
 	}
 }
@@ -23,7 +24,7 @@ func TestWriteMailboxStateRoundTrips(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	want := mailboxState{Version: mailboxStateVersion, LastID: 42, TotalOctets: 12345}
+	want := mailboxState{Version: mailboxStateVersion, LastID: 42, TotalOctets: 12345, DeletedRanges: deletedRanges{{Start: 3, End: 5, AccCount: 3}, {Start: 8, End: 9, AccCount: 5}}}
 	if err := writeMailboxState(root, want); err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +32,7 @@ func TestWriteMailboxStateRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("state = %+v, want %+v", got, want)
 	}
 
@@ -55,7 +56,7 @@ func TestReadMailboxStateRejectsInvalidContent(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]string{
-		"wrong version":  `{"version":2,"last_id":0,"total_octets":0}`,
+		"wrong version":  `{"version":3,"last_id":0,"total_octets":0}`,
 		"unknown field":  `{"version":1,"last_id":0,"total_octets":0,"extra":1}`,
 		"trailing value": `{"version":1,"last_id":0,"total_octets":0} {}`,
 		"invalid empty":  `{"version":1,"last_id":0,"total_octets":1}`,
@@ -74,5 +75,20 @@ func TestReadMailboxStateRejectsInvalidContent(t *testing.T) {
 				t.Fatal("readMailboxState returned an empty error")
 			}
 		})
+	}
+}
+
+func TestReadLegacyStateUpgradesWithoutReassigningIDs(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "state"), []byte(`{"version":1,"last_id":123,"total_octets":456}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, err := readMailboxState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Version != mailboxStateVersion || state.LastID != 123 || state.TotalOctets != 456 || len(state.DeletedRanges) != 0 {
+		t.Fatalf("legacy state = %+v", state)
 	}
 }

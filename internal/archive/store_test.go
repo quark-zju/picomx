@@ -12,7 +12,7 @@ func TestDeliverPublishesSequentialMessageAndState(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	store, err := New(root)
+	store, err := testNew(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,27 +21,23 @@ func TestDeliverPublishesSequentialMessageAndState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := path, filepath.Join(root, "1", "001.eml"); got != want {
+	if got, want := path, "1/001.eml"; got != want {
 		t.Fatalf("message path = %q, want %q", got, want)
 	}
-	content, err := os.ReadFile(path)
+	content, err := store.git(nil, "cat-file", "blob", "HEAD:"+path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := string(content); got != message {
 		t.Fatalf("message = %q, want %q", got, message)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(path))); !os.IsNotExist(err) {
+		t.Fatalf("bare archive created a working file: %v", err)
 	}
-	if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
-		t.Fatalf("mode = %o, want %o", got, want)
+	if bare, err := store.git(nil, "rev-parse", "--is-bare-repository"); err != nil || strings.TrimSpace(string(bare)) != "true" {
+		t.Fatalf("not a bare repository: %s, %v", bare, err)
 	}
-	state, err := readMailboxState(root)
-	if err != nil {
-		t.Fatal(err)
-	}
+	state := store.state
 	if got, want := state.LastID, uint64(1); got != want {
 		t.Fatalf("last ID = %d, want %d", got, want)
 	}
@@ -61,7 +57,7 @@ func TestDeliverUsesSequentialIDs(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	store, err := New(root)
+	store, err := testNew(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,16 +69,13 @@ func TestDeliverUsesSequentialIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := first, filepath.Join(root, "1", "001.eml"); got != want {
+	if got, want := first, "1/001.eml"; got != want {
 		t.Fatalf("first path = %q, want %q", got, want)
 	}
-	if got, want := second, filepath.Join(root, "1", "002.eml"); got != want {
+	if got, want := second, "1/002.eml"; got != want {
 		t.Fatalf("second path = %q, want %q", got, want)
 	}
-	state, err := readMailboxState(root)
-	if err != nil {
-		t.Fatal(err)
-	}
+	state := store.state
 	if state.LastID != 2 || state.TotalOctets != uint64(len("firstsecond")) {
 		t.Fatalf("state = %+v", state)
 	}
@@ -91,7 +84,7 @@ func TestDeliverUsesSequentialIDs(t *testing.T) {
 func TestStageRemainsInvisibleUntilPublish(t *testing.T) {
 	t.Parallel()
 
-	store, err := New(t.TempDir())
+	store, err := testNew(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +93,11 @@ func TestStageRemainsInvisibleUntilPublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer staged.Discard()
-	if got := store.Snapshot(); got != (Snapshot{}) {
+	info, err := os.Stat(staged.(*StagedMessage).path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("staging permissions: %v, %v", info, err)
+	}
+	if got := store.Snapshot(); got.Count() != 0 || got.TotalOctets != 0 {
 		t.Fatalf("snapshot before publish = %+v", got)
 	}
 	file, err := staged.Open()
@@ -122,7 +119,7 @@ func TestStageRemainsInvisibleUntilPublish(t *testing.T) {
 	if id != 1 || path == "" {
 		t.Fatalf("Publish = %d, %q", id, path)
 	}
-	if got := store.Snapshot(); got != (Snapshot{LastID: 1, TotalOctets: 6}) {
+	if got := store.Snapshot(); got.LastID != 1 || got.Count() != 1 || got.TotalOctets != 6 {
 		t.Fatalf("snapshot after publish = %+v", got)
 	}
 }
@@ -131,11 +128,11 @@ func TestDeliverNeverOverwritesExistingMessage(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	firstStore, err := New(root)
+	firstStore, err := testNew(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondStore, err := New(root)
+	secondStore, err := testNew(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +144,7 @@ func TestDeliverNeverOverwritesExistingMessage(t *testing.T) {
 	if _, err := secondStore.Deliver(strings.NewReader("replacement")); err == nil {
 		t.Fatal("colliding delivery overwrote an existing archive path")
 	}
-	content, err := os.ReadFile(path)
+	content, err := firstStore.git(nil, "cat-file", "blob", "HEAD:"+path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +156,17 @@ func TestDeliverNeverOverwritesExistingMessage(t *testing.T) {
 func TestNewRejectsEmptyRoot(t *testing.T) {
 	t.Parallel()
 
-	if _, err := New("  "); err == nil {
+	if _, err := testNew(t, "  "); err == nil {
 		t.Fatal("New accepted an empty root")
 	}
+}
+
+// testNew ensures children and timers stop before testing removes the repo.
+func testNew(t *testing.T, root string) (*Store, error) {
+	t.Helper()
+	store, err := New(root)
+	if err == nil {
+		t.Cleanup(func() { _ = store.Close() })
+	}
+	return store, err
 }

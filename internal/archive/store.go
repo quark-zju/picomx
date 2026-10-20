@@ -1,4 +1,4 @@
-// Package archive stores complete RFC 5322 messages in an append-only tree.
+// Package archive stores complete RFC 5322 messages in a bare Git repository.
 package archive
 
 import (
@@ -10,13 +10,24 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Store writes immutable messages under deterministic, sequential ID paths.
 type Store struct {
-	root  string
-	mu    sync.Mutex
-	state mailboxState
+	root           string
+	mu             sync.Mutex
+	state          mailboxState
+	headID         string
+	failure        error
+	refName        string
+	gitMu          sync.Mutex
+	importer       *importProcess
+	importError    error
+	closed         bool
+	idleTimer      *time.Timer
+	idleGeneration uint64
+	idleTimeout    time.Duration
 }
 
 // StagedMessage is a complete synced message that is not visible in the mailbox.
@@ -38,18 +49,22 @@ func New(root string) (*Store, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("message archive root is required")
 	}
-	state, err := readMailboxState(root)
+	absolute, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
 	}
-	state, err = recoverMailboxTail(root, state)
-	if err != nil {
+	if err := os.MkdirAll(absolute, 0o700); err != nil {
 		return nil, err
 	}
-	return &Store{root: root, state: state}, nil
+	store := &Store{root: absolute}
+	if err := store.initializeGit(); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	return store, nil
 }
 
-// Deliver durably publishes one immutable message and returns its final path.
+// Deliver durably publishes one immutable message and returns its path within the committed Git tree.
 // It never overwrites an existing archive file.
 func (s *Store) Deliver(message io.Reader) (finalPath string, err error) {
 	staged, err := s.Stage(message)
@@ -131,6 +146,9 @@ func (s *Store) Publish(staged Staged) (id uint64, finalPath string, err error) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.failure != nil {
+		return 0, "", s.failure
+	}
 	if s.state.LastID == math.MaxUint64 {
 		return 0, "", errors.New("message ID space exhausted")
 	}
@@ -139,27 +157,24 @@ func (s *Store) Publish(staged Staged) (id uint64, finalPath string, err error) 
 	if err != nil {
 		return 0, "", err
 	}
-	finalPath = filepath.Join(s.root, relativePath)
-	finalDir := filepath.Dir(finalPath)
-	if err := os.MkdirAll(finalDir, 0o700); err != nil {
-		return 0, "", fmt.Errorf("create archive directory: %w", err)
-	}
+	finalPath = filepath.ToSlash(relativePath)
 	if message.size > math.MaxUint64-s.state.TotalOctets {
 		return 0, "", errors.New("mailbox octet count overflow")
 	}
-	if err := os.Link(message.path, finalPath); err != nil {
-		return 0, "", fmt.Errorf("publish message without overwrite: %w", err)
-	}
-	if err := syncDirectory(finalDir); err != nil {
-		return 0, "", err
-	}
 
 	nextState := mailboxState{
-		Version:     mailboxStateVersion,
-		LastID:      nextID,
-		TotalOctets: s.state.TotalOctets + message.size,
+		Version:       mailboxStateVersion,
+		LastID:        nextID,
+		TotalOctets:   s.state.TotalOctets + message.size,
+		DeletedRanges: s.state.DeletedRanges,
 	}
-	if err := writeMailboxState(s.root, nextState); err != nil {
+	// Hash the staged bytes without materializing a working copy.
+	content, err := os.ReadFile(message.path)
+	if err != nil {
+		return 0, "", err
+	}
+	if err := s.commitChanges(fmt.Sprintf("mail: receive %d", nextID), nextState,
+		map[string][]byte{filepath.ToSlash(relativePath): content}, nil); err != nil {
 		return 0, "", err
 	}
 	s.state = nextState

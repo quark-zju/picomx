@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -22,19 +21,24 @@ import (
 )
 
 type fakeMailbox struct {
-	snapshot archive.Snapshot
-	sizes    map[uint64]uint64
+	snapshot    archive.Snapshot
+	sizes       map[uint64]uint64
+	deleteError error
 }
 
+func (m fakeMailbox) Delete([]uint64) error { return m.deleteError }
+
 func (m fakeMailbox) Snapshot() archive.Snapshot { return m.snapshot }
-func (m fakeMailbox) Size(id uint64) (uint64, error) {
+func (m fakeMailbox) SizeAt(_ archive.Snapshot, id uint64) (uint64, error) {
 	size, ok := m.sizes[id]
 	if !ok {
 		return 0, archive.ErrNoSuchMessage
 	}
 	return size, nil
 }
-func (m fakeMailbox) Open(uint64) (*os.File, error) { return nil, archive.ErrNoSuchMessage }
+func (m fakeMailbox) OpenAt(archive.Snapshot, uint64) (io.ReadCloser, error) {
+	return nil, archive.ErrNoSuchMessage
+}
 
 func TestAuthorizationCapturesSnapshot(t *testing.T) {
 	t.Parallel()
@@ -129,7 +133,7 @@ func TestMailboxListingsUseAuthenticatedSnapshot(t *testing.T) {
 func TestRetrieveAndTopStreamCanonicalMessage(t *testing.T) {
 	t.Parallel()
 
-	store, err := archive.New(t.TempDir())
+	store, err := testArchive(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +174,7 @@ func TestRetrieveAndTopStreamCanonicalMessage(t *testing.T) {
 	)
 }
 
-func TestReadOnlyTransactionCommands(t *testing.T) {
+func TestTransactionCommands(t *testing.T) {
 	t.Parallel()
 
 	mailbox := fakeMailbox{
@@ -191,7 +195,7 @@ func TestReadOnlyTransactionCommands(t *testing.T) {
 	expectLine(t, responses, "-ERR authenticate first")
 	login(t, client, responses, "alice", "password")
 	writeLine(t, client, "DELE 1")
-	expectLine(t, responses, "-ERR archive is read-only")
+	expectLine(t, responses, "+OK message marked for deletion")
 	writeLine(t, client, "RSET")
 	expectLine(t, responses, "+OK no messages deleted")
 	writeLine(t, client, "NOOP")
@@ -302,8 +306,19 @@ func TestCredentialsRequireBothFields(t *testing.T) {
 func startSession(t *testing.T, server *Server) (net.Conn, *bufio.Reader) {
 	t.Helper()
 	serverConn, clientConn := net.Pipe()
-	go server.serveConn(serverConn, 0x0304)
-	t.Cleanup(func() { _ = clientConn.Close() })
+	done := make(chan struct{})
+	go func() { defer close(done); server.serveConn(serverConn, 0x0304) }()
+	if err := clientConn.SetDeadline(time.Now().Add(20 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("POP3 session did not close")
+		}
+	})
 	return clientConn, bufio.NewReader(clientConn)
 }
 
@@ -354,4 +369,147 @@ func expectLines(t *testing.T, reader *bufio.Reader, want ...string) {
 	for _, line := range want {
 		expectLine(t, reader, line)
 	}
+}
+
+func TestConcurrentSessionsKeepSnapshotsAndMergeDeletions(t *testing.T) {
+	t.Parallel()
+	store, err := testArchive(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := []string{"Subject: one\r\n\r\none\r\n", "Subject: two\r\n\r\ntwo\r\n", "Subject: three\r\n\r\nthree\r\n"}
+	for _, message := range messages {
+		if _, err := store.Deliver(strings.NewReader(message)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := NewServer(Options{Hostname: "pop.example.com", Mailbox: store, Credentials: testCredentials(t, "alice", "password")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, ar := startSession(t, server)
+	b, br := startSession(t, server)
+	for _, session := range []struct {
+		client net.Conn
+		reader *bufio.Reader
+	}{{a, ar}, {b, br}} {
+		expectLine(t, session.reader, "+OK pop.example.com picomx ready")
+		login(t, session.client, session.reader, "alice", "password")
+	}
+	writeLine(t, a, "DELE 2")
+	expectLine(t, ar, "+OK message marked for deletion")
+	writeLine(t, a, "STAT")
+	expectLine(t, ar, fmt.Sprintf("+OK 2 %d", len(messages[0])+len(messages[2])))
+	writeLine(t, a, "LIST")
+	expectLines(t, ar, "+OK listing follows", fmt.Sprintf("1 %d", len(messages[0])), fmt.Sprintf("3 %d", len(messages[2])), ".")
+	writeLine(t, a, "UIDL")
+	expectLines(t, ar, "+OK listing follows", "1 picomx-1", "3 picomx-3", ".")
+	for _, command := range []string{"DELE 2", "LIST 2", "UIDL 2", "RETR 2"} {
+		writeLine(t, a, command)
+		expectLine(t, ar, "-ERR no such message")
+	}
+	writeLine(t, a, "RSET")
+	expectLine(t, ar, "+OK no messages deleted")
+	writeLine(t, a, "STAT")
+	expectLine(t, ar, fmt.Sprintf("+OK 3 %d", len(messages[0])+len(messages[1])+len(messages[2])))
+	writeLine(t, a, "DELE 2")
+	expectLine(t, ar, "+OK message marked for deletion")
+	writeLine(t, a, "QUIT")
+	expectLine(t, ar, "+OK bye")
+
+	// B retains the original numbering, sizes and content after A's removal.
+	writeLine(t, b, "STAT")
+	expectLine(t, br, fmt.Sprintf("+OK 3 %d", len(messages[0])+len(messages[1])+len(messages[2])))
+	writeLine(t, b, "RETR 2")
+	expectLines(t, br, fmt.Sprintf("+OK %d octets", len(messages[1])), "Subject: two", "", "two", ".")
+	writeLine(t, b, "TOP 2 0")
+	expectLines(t, br, "+OK top of message follows", "Subject: two", "", ".")
+	for _, number := range []string{"2", "3"} {
+		writeLine(t, b, "DELE "+number)
+		expectLine(t, br, "+OK message marked for deletion")
+	}
+	if _, err := store.Deliver(strings.NewReader("Subject: four\r\n\r\nfour\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	writeLine(t, b, "UIDL 4")
+	expectLine(t, br, "-ERR no such message")
+	writeLine(t, b, "QUIT")
+	expectLine(t, br, "+OK bye")
+
+	// A fresh session has consecutive message numbers but permanent UIDLs.
+	c, cr := startSession(t, server)
+	expectLine(t, cr, "+OK pop.example.com picomx ready")
+	login(t, c, cr, "alice", "password")
+	writeLine(t, c, "UIDL")
+	expectLines(t, cr, "+OK listing follows", "1 picomx-1", "2 picomx-4", ".")
+	writeLine(t, c, "RETR 2")
+	expectLines(t, cr, fmt.Sprintf("+OK %d octets", len("Subject: four\r\n\r\nfour\r\n")), "Subject: four", "", "four", ".")
+	writeLine(t, c, "QUIT")
+	expectLine(t, cr, "+OK bye")
+	if store.Snapshot().Count() != 2 {
+		t.Fatalf("mail count = %d", store.Snapshot().Count())
+	}
+}
+
+func TestDisconnectCancelsPendingDeletions(t *testing.T) {
+	t.Parallel()
+	store, err := testArchive(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver(strings.NewReader("Subject: keep\r\n\r\nbody\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(Options{Hostname: "pop.example.com", Mailbox: store, Credentials: testCredentials(t, "alice", "password")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverConn, client := net.Pipe()
+	done := make(chan struct{})
+	go func() { defer close(done); server.serveConn(serverConn, 0x0304) }()
+	responses := bufio.NewReader(client)
+	expectLine(t, responses, "+OK pop.example.com picomx ready")
+	login(t, client, responses, "alice", "password")
+	writeLine(t, client, "DELE 1")
+	expectLine(t, responses, "+OK message marked for deletion")
+	_ = client.Close()
+	<-done
+	if store.Snapshot().Count() != 1 {
+		t.Fatal("disconnect committed a deletion")
+	}
+	if file, err := store.Open(1); err != nil {
+		t.Fatal(err)
+	} else {
+		_ = file.Close()
+	}
+}
+
+func TestQuitReportsDeletionFailure(t *testing.T) {
+	t.Parallel()
+	server, err := NewServer(Options{
+		Hostname: "pop.example.com", Credentials: testCredentials(t, "alice", "password"),
+		Mailbox: fakeMailbox{snapshot: archive.Snapshot{LastID: 1, TotalOctets: 10}, sizes: map[uint64]uint64{1: 10}, deleteError: errors.New("disk unavailable")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, responses := startSession(t, server)
+	expectLine(t, responses, "+OK pop.example.com picomx ready")
+	login(t, client, responses, "alice", "password")
+	writeLine(t, client, "DELE 1")
+	expectLine(t, responses, "+OK message marked for deletion")
+	writeLine(t, client, "QUIT")
+	expectLine(t, responses, "-ERR unable to commit deletions")
+	if _, err := responses.ReadString('\n'); err == nil {
+		t.Fatal("QUIT failure left connection open")
+	}
+}
+
+func testArchive(t *testing.T, root string) (*archive.Store, error) {
+	t.Helper()
+	store, err := archive.New(root)
+	if err == nil {
+		t.Cleanup(func() { _ = store.Close() })
+	}
+	return store, err
 }

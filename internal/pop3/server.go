@@ -1,4 +1,4 @@
-// Package pop3 implements picomx's deliberately read-only POP3 surface.
+// Package pop3 implements picomx's POP3 surface with Git-backed deletion.
 package pop3
 
 import (
@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,8 +24,9 @@ const (
 
 type mailbox interface {
 	Snapshot() archive.Snapshot
-	Size(uint64) (uint64, error)
-	Open(uint64) (*os.File, error)
+	SizeAt(archive.Snapshot, uint64) (uint64, error)
+	OpenAt(archive.Snapshot, uint64) (io.ReadCloser, error)
+	Delete([]uint64) error
 }
 
 // Options configures the POP3 protocol state machine.
@@ -40,7 +40,7 @@ type Options struct {
 	Logger          *slog.Logger
 }
 
-// Server serves one read-only maildrop.
+// Server serves one maildrop with independent, immutable session snapshots.
 type Server struct {
 	hostname        string
 	mailbox         mailbox
@@ -133,6 +133,8 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 	var username string
 	var authenticated bool
 	var snapshot archive.Snapshot
+	deleted := map[uint64]bool{}
+	var deletedOctets uint64
 	authFailures := 0
 
 	if !s.reply(conn, writer, "+OK "+s.hostname+" picomx ready") {
@@ -204,25 +206,25 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 				"tls_version", tlsVersion,
 				"username", username,
 			)
-			s.reply(conn, writer, fmt.Sprintf("+OK maildrop ready with %d messages", snapshot.LastID))
+			s.reply(conn, writer, fmt.Sprintf("+OK maildrop ready with %d messages", snapshot.Count()))
 		case "STAT":
 			if !authenticated || argument != "" {
 				s.reply(conn, writer, "-ERR command not valid now")
 				continue
 			}
-			s.reply(conn, writer, fmt.Sprintf("+OK %d %d", snapshot.LastID, snapshot.TotalOctets))
+			s.reply(conn, writer, fmt.Sprintf("+OK %d %d", snapshot.Count()-uint64(len(deleted)), snapshot.TotalOctets-deletedOctets))
 		case "LIST":
 			if !authenticated {
 				s.reply(conn, writer, "-ERR authenticate first")
 				continue
 			}
 			if argument != "" {
-				id, ok := messageID(argument, snapshot.LastID)
-				if !ok {
+				id, ok := messageID(argument, snapshot.Count())
+				if !ok || deleted[id] {
 					s.reply(conn, writer, "-ERR no such message")
 					continue
 				}
-				size, err := s.mailbox.Size(id)
+				size, err := s.messageSize(snapshot, id)
 				if err != nil {
 					s.reply(conn, writer, "-ERR unable to inspect message")
 					continue
@@ -230,8 +232,8 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 				s.reply(conn, writer, fmt.Sprintf("+OK %d %d", id, size))
 				continue
 			}
-			if !s.writeListing(conn, writer, snapshot.LastID, func(id uint64) (string, error) {
-				size, err := s.mailbox.Size(id)
+			if !s.writeListing(conn, writer, snapshot, deleted, func(id, permanentID uint64) (string, error) {
+				size, err := s.mailbox.SizeAt(snapshot, permanentID)
 				return fmt.Sprintf("%d %d", id, size), err
 			}) {
 				return
@@ -242,16 +244,16 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 				continue
 			}
 			if argument != "" {
-				id, ok := messageID(argument, snapshot.LastID)
-				if !ok {
+				id, ok := messageID(argument, snapshot.Count())
+				if !ok || deleted[id] {
 					s.reply(conn, writer, "-ERR no such message")
 					continue
 				}
-				s.reply(conn, writer, fmt.Sprintf("+OK %d %s", id, uniqueID(id)))
+				s.reply(conn, writer, fmt.Sprintf("+OK %d %s", id, snapshotUID(snapshot, id)))
 				continue
 			}
-			if !s.writeListing(conn, writer, snapshot.LastID, func(id uint64) (string, error) {
-				return fmt.Sprintf("%d %s", id, uniqueID(id)), nil
+			if !s.writeListing(conn, writer, snapshot, deleted, func(id, permanentID uint64) (string, error) {
+				return fmt.Sprintf("%d %s", id, uniqueID(permanentID)), nil
 			}) {
 				return
 			}
@@ -260,17 +262,17 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 				s.reply(conn, writer, "-ERR authenticate first")
 				continue
 			}
-			id, ok := messageID(argument, snapshot.LastID)
-			if !ok {
+			id, ok := messageID(argument, snapshot.Count())
+			if !ok || deleted[id] {
 				s.reply(conn, writer, "-ERR no such message")
 				continue
 			}
-			size, err := s.mailbox.Size(id)
+			size, err := s.messageSize(snapshot, id)
 			if err != nil {
 				s.reply(conn, writer, "-ERR unable to inspect message")
 				continue
 			}
-			file, err := s.mailbox.Open(id)
+			file, err := s.openMessage(snapshot, id)
 			if err != nil {
 				s.reply(conn, writer, "-ERR unable to open message")
 				continue
@@ -285,12 +287,12 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 				s.reply(conn, writer, "-ERR authenticate first")
 				continue
 			}
-			id, bodyLines, ok := topArguments(argument, snapshot.LastID)
-			if !ok {
+			id, bodyLines, ok := topArguments(argument, snapshot.Count())
+			if !ok || deleted[id] {
 				s.reply(conn, writer, "-ERR invalid arguments")
 				continue
 			}
-			file, err := s.mailbox.Open(id)
+			file, err := s.openMessage(snapshot, id)
 			if err != nil {
 				s.reply(conn, writer, "-ERR unable to open message")
 				continue
@@ -305,16 +307,26 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 				s.reply(conn, writer, "-ERR authenticate first")
 				continue
 			}
-			if _, ok := messageID(argument, snapshot.LastID); !ok {
+			id, ok := messageID(argument, snapshot.Count())
+			if !ok || deleted[id] {
 				s.reply(conn, writer, "-ERR no such message")
 				continue
 			}
-			s.reply(conn, writer, "-ERR archive is read-only")
+			size, err := s.messageSize(snapshot, id)
+			if err != nil {
+				s.reply(conn, writer, "-ERR unable to inspect message")
+				continue
+			}
+			deleted[id] = true
+			deletedOctets += size
+			s.reply(conn, writer, "+OK message marked for deletion")
 		case "RSET":
 			if !authenticated || argument != "" {
 				s.reply(conn, writer, "-ERR command not valid now")
 				continue
 			}
+			deleted = map[uint64]bool{}
+			deletedOctets = 0
 			s.reply(conn, writer, "+OK no messages deleted")
 		case "NOOP":
 			if !authenticated || argument != "" {
@@ -326,6 +338,18 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 			if argument != "" {
 				s.reply(conn, writer, "-ERR invalid arguments")
 				continue
+			}
+			if authenticated && len(deleted) > 0 {
+				ids := make([]uint64, 0, len(deleted))
+				for number := range deleted {
+					permanentID, _ := snapshot.ID(number)
+					ids = append(ids, permanentID)
+				}
+				if err := s.mailbox.Delete(ids); err != nil {
+					s.logger.Error("POP3 deletion failed", "protocol", "pop3", "client_ip", remoteIP, "error", err)
+					s.reply(conn, writer, "-ERR unable to commit deletions")
+					return
+				}
 			}
 			s.reply(conn, writer, "+OK bye")
 			return
@@ -381,31 +405,52 @@ func (s *Server) replyMulti(conn net.Conn, writer *bufio.Writer, lines []string)
 	return writer.Flush() == nil
 }
 
-func (s *Server) writeListing(conn net.Conn, writer *bufio.Writer, lastID uint64, row func(uint64) (string, error)) bool {
+func (s *Server) writeListing(conn net.Conn, writer *bufio.Writer, snapshot archive.Snapshot, deleted map[uint64]bool, row func(uint64, uint64) (string, error)) bool {
 	if err := conn.SetWriteDeadline(time.Now().Add(s.idleTimeout)); err != nil {
 		return false
 	}
 	if _, err := writer.WriteString("+OK listing follows\r\n"); err != nil {
 		return false
 	}
-	if lastID > 0 {
-		for id := uint64(1); ; id++ {
-			line, err := row(id)
-			if err != nil {
-				return false
-			}
-			if _, err := writer.WriteString(line + "\r\n"); err != nil {
-				return false
-			}
-			if id == lastID {
-				break
-			}
+	err := snapshot.Walk(func(number, id uint64) error {
+		if deleted[number] {
+			return nil
 		}
+		line, err := row(number, id)
+		if err != nil {
+			return err
+		}
+		_, err = writer.WriteString(line + "\r\n")
+		return err
+	})
+	if err != nil {
+		return false
 	}
 	if _, err := writer.WriteString(".\r\n"); err != nil {
 		return false
 	}
 	return writer.Flush() == nil
+}
+
+func (s *Server) messageSize(snapshot archive.Snapshot, number uint64) (uint64, error) {
+	id, ok := snapshot.ID(number)
+	if !ok {
+		return 0, archive.ErrNoSuchMessage
+	}
+	return s.mailbox.SizeAt(snapshot, id)
+}
+
+func (s *Server) openMessage(snapshot archive.Snapshot, number uint64) (io.ReadCloser, error) {
+	id, ok := snapshot.ID(number)
+	if !ok {
+		return nil, archive.ErrNoSuchMessage
+	}
+	return s.mailbox.OpenAt(snapshot, id)
+}
+
+func snapshotUID(snapshot archive.Snapshot, number uint64) string {
+	id, _ := snapshot.ID(number)
+	return uniqueID(id)
 }
 
 func messageID(argument string, lastID uint64) (uint64, bool) {

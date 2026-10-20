@@ -11,18 +11,18 @@ func TestNewRecoversOnePublishedTailMessage(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	store, err := New(root)
-	if err != nil {
+	// Reproduce the legacy crash window before importing the archive into Git.
+	if err := os.MkdirAll(filepath.Join(root, "1"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Deliver(strings.NewReader("first")); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "1", "001.eml"), []byte("first"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeMailboxState(root, emptyMailboxState()); err != nil {
 		t.Fatal(err)
 	}
 
-	recovered, err := New(root)
+	recovered, err := testNew(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestNewRecoversOnePublishedTailMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := path, filepath.Join(root, "1", "002.eml"); got != want {
+	if got, want := path, "1/002.eml"; got != want {
 		t.Fatalf("next path = %q, want %q", got, want)
 	}
 }
@@ -59,7 +59,7 @@ func TestNewRejectsStateThatTrailsMultipleMessages(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := New(root); err == nil {
+	if _, err := testNew(t, root); err == nil {
 		t.Fatal("New accepted state trailing multiple messages")
 	}
 }
@@ -72,7 +72,7 @@ func TestNewRejectsMissingIndexedTail(t *testing.T) {
 	if err := writeMailboxState(root, state); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(root); err == nil {
+	if _, err := testNew(t, root); err == nil {
 		t.Fatal("New accepted a missing indexed tail message")
 	}
 }

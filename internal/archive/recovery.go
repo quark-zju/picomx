@@ -9,7 +9,7 @@ import (
 )
 
 func recoverMailboxTail(root string, state mailboxState) (mailboxState, error) {
-	if state.LastID > 0 {
+	if state.LastID > 0 && !state.DeletedRanges.contains(state.LastID) {
 		info, err := statMessage(root, state.LastID)
 		if err != nil {
 			return mailboxState{}, fmt.Errorf("validate last indexed message %d: %w", state.LastID, err)
@@ -45,9 +45,10 @@ func recoverMailboxTail(root string, state mailboxState) (mailboxState, error) {
 	}
 
 	recovered := mailboxState{
-		Version:     mailboxStateVersion,
-		LastID:      nextID,
-		TotalOctets: state.TotalOctets + uint64(info.Size()),
+		Version:       mailboxStateVersion,
+		LastID:        nextID,
+		TotalOctets:   state.TotalOctets + uint64(info.Size()),
+		DeletedRanges: state.DeletedRanges,
 	}
 	if err := writeMailboxState(root, recovered); err != nil {
 		return mailboxState{}, fmt.Errorf("record recovered mailbox tail: %w", err)

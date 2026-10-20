@@ -10,14 +10,15 @@ import (
 )
 
 const (
-	mailboxStateVersion = 1
+	mailboxStateVersion = 2
 	mailboxStateName    = "state"
 )
 
 type mailboxState struct {
-	Version     int    `json:"version"`
-	LastID      uint64 `json:"last_id"`
-	TotalOctets uint64 `json:"total_octets"`
+	Version       int           `json:"version"`
+	LastID        uint64        `json:"last_id"`
+	TotalOctets   uint64        `json:"total_octets"`
+	DeletedRanges deletedRanges `json:"deleted_ranges,omitempty"`
 }
 
 func emptyMailboxState() mailboxState {
@@ -34,7 +35,11 @@ func readMailboxState(root string) (mailboxState, error) {
 	}
 	defer file.Close()
 
-	decoder := json.NewDecoder(file)
+	return decodeMailboxState(file)
+}
+
+func decodeMailboxState(source io.Reader) (mailboxState, error) {
+	decoder := json.NewDecoder(source)
 	decoder.DisallowUnknownFields()
 	var state mailboxState
 	if err := decoder.Decode(&state); err != nil {
@@ -43,12 +48,19 @@ func readMailboxState(root string) (mailboxState, error) {
 	if err := ensureJSONEOF(decoder); err != nil {
 		return mailboxState{}, fmt.Errorf("decode mailbox state: %w", err)
 	}
-	if state.Version != mailboxStateVersion {
+	if state.Version != 1 && state.Version != mailboxStateVersion {
 		return mailboxState{}, fmt.Errorf("unsupported mailbox state version %d", state.Version)
 	}
-	if state.LastID == 0 && state.TotalOctets != 0 {
+	if state.Version == 1 && len(state.DeletedRanges) != 0 {
+		return mailboxState{}, errors.New("legacy state cannot contain deleted ranges")
+	}
+	if err := state.DeletedRanges.validate(state.LastID); err != nil {
+		return mailboxState{}, err
+	}
+	if state.LastID == state.DeletedRanges.count() && state.TotalOctets != 0 {
 		return mailboxState{}, errors.New("empty mailbox state has nonzero total octets")
 	}
+	state.Version = mailboxStateVersion
 	return state, nil
 }
 
@@ -63,6 +75,8 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 	return nil
 }
 
+// writeMailboxState is only used while recovering a legacy file archive.
+// Normal mailbox updates store state as a blob in the same commit as the mail.
 func writeMailboxState(root string, state mailboxState) (err error) {
 	if state.Version != mailboxStateVersion {
 		return fmt.Errorf("refuse to write mailbox state version %d", state.Version)
