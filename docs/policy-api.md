@@ -87,17 +87,25 @@ POP3S 使用 995 端口 implicit TLS，不提供明文 POP3 或 STLS。首版只
 hash 用户名和密码并 constant-time 比较；环境配置缺失或不完整时全部认证失败。USER
 响应不泄漏用户名是否存在；每次失败 PASS 产生 fail2ban 可匹配的结构化日志。
 
-## POP3 的 append-only 语义
+## POP3 快照与删除语义
 
-- 认证成功只取得 `{last ID, total octets}` 快照，不扫描或复制邮件元数据；
-- archive ID 直接作为稳定的 message number，UIDL 使用其可打印编码；
-- 实现 `CAPA`、`USER`、`PASS`、`STAT`、`LIST`、`UIDL`、`RETR`、`TOP`、`NOOP`、`RSET`、
-  `QUIT`；
-- `DELE` 始终返回 `-ERR archive is read-only`，`RSET` 因而是无操作；
-- 客户端必须配置为“在服务器保留邮件”；
-- 不保存已读、下载时间或每客户端游标，所有同步状态留给客户端；
-- archive 中的消息在写入时规范化为 CRLF，POP 的 `LIST` octet count 与 `RETR` 一致；
-- `STAT`、带参数的 `LIST`/`UIDL` 和单封读取均为常数或有界目录访问；只有客户端明确
-  请求不带参数的 `LIST`/`UIDL` 时才遍历或生成全部邮件项。
+- 认证成功取得固定的 `{last_id,total_octets,deleted_ranges,commit}` 快照，O(1) 引用
+  不可变的删除区间，不扫描或复制逐邮件元数据；
+- 支持并发认证会话，每个会话的 POP3 message number 从 1 到存活邮件数；通过累计
+  删除数二分映射到永久 archive ID，UIDL 继续由该永久 ID 编码，跨会话保持稳定；
+- 实现 `CAPA`、`USER`、`PASS`、`STAT`、`LIST`、`UIDL`、`RETR`、`TOP`、`DELE`、`NOOP`、
+  `RSET`、`QUIT`；
+- `DELE` 只标记本会话的邮件，立即从 `STAT`、`LIST`、`UIDL` 中排除；后续访问该
+  message number 返回错误，剩余邮件在本会话中不重新编号；
+- `RSET` 撤销全部标记，断线或超时不提交删除；正常 `QUIT` 将标记批量提交 Git；
+- 批量删除合并到最新邮箱状态，重复删除视为成功，新收邮件不受影响。Git 事务失败
+  返回 `-ERR` 并关闭连接；引用已更新时删除可能已生效，重启从 HEAD 读取权威状态；
+- 当前树中的删除不移除祖先提交中的原文；`last_id` 不回退，旧 ID 不复用；
+- 读取快照提交中的原文，因此其他客户端删除后，本会话仍能读取；
+- 客户端可配置为保留服务器邮件，也可下载后删除；已读、下载时间和客户端游标
+  仍由客户端自行管理；
+- 消息在写入时规范化为 CRLF，Git 保存原始字节，`LIST` octet count 与 `RETR` 一致；
+- `STAT` 为 O(1)，单封序号定位为 O(log R)，完整列表遍历为 O(N+R)；R 为删除区间数，
+  N 为快照存活邮件数。这些是内存索引成本，不包括读取 Git 对象的 I/O 和进程开销。
 
 首版只实现 accept、reject 和 tempfail，不提供 silent discard 或 quarantine。

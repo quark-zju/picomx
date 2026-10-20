@@ -16,7 +16,7 @@ Webmail、日历、通讯录、邮件列表、多租户管理或与现有 MTA �
 
 ```text
 Internet MTA --SMTP/25--+
-                         +--> picomx --> append-only archive --> optional backup / notmuch
+                         +--> picomx --> Git archive --> optional backup / notmuch
 MUA <--POP3S/995---------+
 
 MUA --> 独立 outbound MTA 或 SMTP relay --> Gmail 等收件方
@@ -24,7 +24,7 @@ MUA --> 独立 outbound MTA 或 SMTP relay --> Gmail 等收件方
 
 “不用 POP3/IMAP”只适用于用户设备与邮件库之间的同步。公网邮件服务器之间收发邮件
 仍然必须使用 SMTP。POP3S 是用户访问存档的协议；如果管理员另行使用 Git 备份，
-它只同步关闭 SMTP 连接后已经原子落盘的文件，不同步临时文件，也不承载投递协议。
+它应同步完整 Git 历史，不同步临时文件，也不承载投递协议。
 
 picomx 监听 SMTP/25 和 POP3S/995，但不提供认证邮件提交，避免成为 open relay。出站
 服务与 picomx 不共享代码、进程、队列或权限；即使出站工具配置错误，也不会扩大公网
@@ -48,42 +48,82 @@ hostname，因此可以复用父域目录中的通配符证书，但不依赖客
 
 ## 存储布局
 
-存档使用连续 archive ID 和有界 fanout，不保存可变的已读状态。ID 以 base-1024 digit
-编码；第一层记录 digit 数，使数量增长时自动加深且任意目录最多约 1024 项：
+存档根目录本身是 bare Git 仓库。物理布局为：
 
 ```text
 messages/
+  HEAD
+  config
+  objects/
+  refs/
   tmp/
-  state
-  1/
-    001.eml
-    ...
-    3ff.eml
-  2/
-    001/
-      000.eml
 ```
 
-邮件先以 `0600` 权限写入同一文件系统的 `tmp/` 并执行 `fsync`，再用 hard link 原子
-发布到 ID 对应路径。hard link 在目标已存在时失败，因此不会像 rename 那样覆盖已有
-文件。成功发布后的文件不改名、不改内容、不表达已读状态。
+Git 提交中的逻辑树沿用有界 fanout 和递增、不复用的 archive ID。ID 以 base-1024
+digit 编码；第一层记录 digit 数，任意 ID 目录最多约 1024 项：
 
-`state` 是小型原子替换的 mailbox 摘要，记录格式版本、最后一个 ID 和规范化消息的
-总 octet 数。picomx 是唯一写者；投递和 state 更新由同一把锁串行化。崩溃发生在消息
-发布与 state 更新之间时，启动只检查确定的下一个路径并恢复尾部，不扫描整个存档。
+```text
+state
+1/001.eml
+1/3ff.eml
+2/001/000.eml
+```
 
-notmuch 可以递归索引任意“一封邮件一个文件”的树，不要求 Maildir；只是这种布局不能
-把 notmuch tags 同步为文件名 flags，符合存档不可变的目标。如果管理员另行使用
-Git 备份，只应提交已发布的 ID 目录和 state；`.gitignore` 忽略 `tmp/`，
-避免同步半封邮件。notmuch 数据库不应提交：它可重建、经常变化，并包含可还原的
-邮件内容。picomx 本身不运行 Git，POP3S 是当前的邮件访问方式。
+邮件先以 `0600` 权限写入 `tmp/` 并执行 fsync。收信和批量删除均由同一把锁串行处理，
+通过常驻 `git fast-import --quiet` 写入 blob、tree、commit，无需 index 或工作目录。
+每个 commit 显式以前一个已确认的 HEAD 为父提交，将新邮件、批量路径删除和新 state
+放入同一个提交。发送 checkpoint，等待其后的 progress 响应，再核对实际 HEAD 等于
+预期的新提交，才发布内存状态和协议成功响应；仅有 progress 不足以排除引用更新失败。
+
+Git 的 committed 对象和引用启用 fsync。进程退出或故障后以 HEAD 为准，未引用对象
+不会成为可见邮件，不需要工作目录恢复日志。发生不确定的写入失败时拒绝继续写入，
+必须修复并重启；已提交但响应中断时，SMTP 重试可能产生重复邮件。
+
+Git 命令通道串行化；读取用 `ls <commit> <path>` 找到 blob，再用 cat-blob 按长度读取
+完整原文，放进 `0600` 的临时文件并立即 unlink，随后向 POP 客户端流式输出，避免慢
+客户端占用 Git 通道、阻塞收信。只查大小使用独立的 `cat-file -s`，不消费整封正文。
+进程空闲 30 秒后关闭 stdin，以 EOF 正常结束；下次操作重新启动。空闲回调带版本号，
+避免旧计时器关闭刚被重新使用的进程。异常时先 kill 再关闭 stdin，避免 EOF 最终更新
+引用时重试发布之前失败的事务。服务关闭时显式停止计时器并回收子进程。
+
+`state` 格式版本 2 保存 `last_id`、存活消息总 octet 数，以及按 ID 升序排列的
+`deleted_ranges: [{start,end,acc_count}, ...]`。区间包含两端，互不重叠，相邻区间合并；
+`acc_count` 是截至当前区间累计删除的数量。已有普通文件存档会在开启删除前导入 Git，
+保留原文副本；版本 1 的 state 在读取时规范化，下一次提交持久化为版本 2。
+现有 ID 与 UIDL 保持不变；分配新 ID 始终使用 `last_id+1`。
+
+认证成功取得 `{last_id,total_octets,deleted_ranges,commit}` 快照。区间数组不可变，
+会话共享同一版本，登录是 O(1)，没有逐邮件编号数组。存活数是 `last_id-累计删除数`。
+给定 POP3 序号 k，二分查找最后一个满足 `end-acc_count < k` 的区间，永久 ID 为
+`k+acc_count`（没有区间则为 k），内存定位复杂度 O(log R)，R 为删除区间数。
+完整列表顺序遍历存活 ID 并整段跳过删除区间，遍历复杂度 O(N+R)。
+
+批量删除先按 ID 排序、去重，整理为新删除区间，再与旧区间线性合并并重算累计数，
+生成新的数组；旧快照不受影响。排序成本 O(D log D)，已排序的批次跳过排序；合并与
+遍历待删除 ID 的成本为 O(R+D)，D 为本次请求删除的邮件数，另有逐文件及 Git 操作。
+Git tree/pack 提交成本独立于内存索引复杂度，不能据此声称整个投递或删除都是对数时间。
+
+多个 POP3 会话可以同时认证。消息编号只在各自会话内连续、固定，UIDL 由永久 ID
+生成；读取来自快照对应的 Git 提交，即使其他会话删除文件也能继续读取。旧会话
+提交删除时合并到最新状态，已删除 ID 视为成功，不覆盖新收到的邮件。历史只追加，
+所以旧快照引用的提交仍可从 HEAD 到达，不需要额外的会话 ref。
+
+启动时验证 Git 树与 state 的存活数和字节数，按规范路径顺序线性遍历，成本 O(N+R)，
+但不在内存保留逐邮件列表。bare 仓库中不创建邮件工作副本，临时文件不进入提交。
+原有带工作目录的仓库需要管理员停服并克隆为 bare 后指定新目录；不自动转换或删除
+已有 .git。notmuch 可在服务之外对检出或导出的文件树索引；备份包含完整 Git 历史。
+
+运行时要求 Git 2.36 或更高版本，Go 代码仍只使用标准库。只执行本地 Git builtins，
+禁用 hooks、fsmonitor、提交签名、换行过滤和自动维护，并隔离继承的 Git 环境变量及
+系统/用户级配置。systemd unit 无需放宽权限，继续禁止出站 `connect(2)`；备份和维护
+由服务之外的程序执行。仓库要求单个守护进程写入，外部修改应先停服，禁止重写历史。
 
 ## 入站 SMTP 的首版约束
 
 - 只接收配置域名的 RCPT，不转发到任意外部地址；
 - 支持 EHLO/HELO、MAIL FROM、RCPT TO、DATA、RSET、NOOP、QUIT；
 - 对命令行、DATA 行、总邮件大小、收件人数、并发连接和空闲时间设硬上限；
-- DATA 成功响应只在文件原子持久化之后返回；
+- DATA 成功响应只在 Git checkpoint 与 HEAD 核对成功之后返回；
 - 保存原始 RFC 5322 内容，并在前面添加 `Return-Path`、`Delivered-To` 和本机
   `Received` 投递头；
 - JSON 结构化日志只记录 envelope、大小、远端地址和结果，不记录正文；
@@ -133,7 +173,7 @@ relay 凭据、不解析本地 submission，也不需要出站网络权限。随
    （SMTP recipient policy）。`PICOMX_DOMAINS` 仍是最外层边界：自定义规则不能接收
    配置以外的域名。
 
-Git 归档不是 picomx 的部署要求；如有需要，可以在服务之外对已发布文件做备份。
+Git 归档是存储的一部分；远程备份可以在服务之外执行。
 邮件静态加密不在当前设计范围内。
 
 POP3S 与可编程策略的边界见 [policy-api.md](policy-api.md)。

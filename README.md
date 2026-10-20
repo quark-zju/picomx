@@ -5,7 +5,7 @@
 项目目标不是重新实现一套完整的群件系统，而是提供几个边界清晰的小工具：
 
 - 用自己的域名收信，允许为每个网站使用不同地址；
-- 将原始邮件存入 append-only 文件树，可用 notmuch 索引；
+- 将原始邮件存入 bare Git 仓库，可删除当前邮件并保留历史；
 - 以尽量少的依赖和协议状态降低攻击面；
 - 发信由用户选择的 MUA、outbound MTA 或 SMTP relay 完成。
 
@@ -13,23 +13,23 @@
 [docs/design.md](docs/design.md)。POP3S、身份与 SMTP policy 接口见
 [docs/policy-api.md](docs/policy-api.md)。
 
-当前可运行范围包括入站 SMTP 存档和只读 POP3S：
+当前可运行范围包括入站 SMTP 存档和支持删除的 POP3S：
 
 - 只接受 `PICOMX_DOMAINS` 中的域名；默认接收这些域名下任意 `@` 前缀的地址；
 - 不实现 SMTP AUTH，也不会向外部域 relay；
-- 将每封信按连续 ID 原子发布到有界 fanout 文件树，发布后不再修改；
-- POP3S 使用单一随机 app password，支持稳定 UIDL，不修改或删除归档；
+- 将每封信按递增且不复用的 ID 保存到有界 fanout 文件树，收信和删除均提交 Git；
+- POP3S 使用单一随机 app password，支持稳定 UIDL、并发会话快照和批量删除；
 - SMTP 收件和完整消息规则可由可选的本地 Go policy 配置；
 - STARTTLS 和 POP3S 共享一张支持通配符查找与自动热加载的证书；
 - 支持 systemd socket activation、结构化日志和可选 fail2ban 规则；
-- 仅使用 Go 标准库。
+- Go 代码仅使用标准库，运行时通过本地 Git 保存历史。
 
 picomx 是永久 receive-only 服务，不会实现出站队列、DKIM 签名或向 Gmail 投递。
 发信程序与 picomx 只通过“使用同一个邮件域名”发生关系，不共享消息队列或状态。
 
 ## 开发
 
-需要 Go 1.24 或更高版本。
+需要 Go 1.24 或更高版本，以及 Git 2.36 或更高版本。部署服务器也必须安装 Git。
 
 ```sh
 make test
@@ -127,8 +127,9 @@ PICOMX_TLS_HOSTNAMES=mx.example.net
 `make deploy` 首次部署时会显示一次 POP3 app password，并把用户名和密码摘要写入
 配置；请立即保存密码。运行用户需要能读取证书私钥；若复用 picosrv 证书目录，部署后运行
 `make facl` 为 `picomx` 用户添加只读 ACL（可用 `CERT_DIR=/path/to/certs make facl`
-覆盖证书目录）。邮件存档由 systemd 创建在
-`/var/lib/picomx/messages`，权限默认为仅 `picomx` 用户可访问。
+覆盖证书目录）。systemd 创建 `/var/lib/picomx`；picomx 自动在
+`/var/lib/picomx/messages` 初始化 bare Git 仓库，权限默认为仅 `picomx` 用户可访问。
+已有文件存档会在首次启动时导入 Git，后续收信和删除都在其历史上追加提交。
 
 ### 4. 放通端口并启动
 
@@ -152,20 +153,50 @@ openssl s_client -starttls smtp -connect mx.example.net:25 -servername mx.exampl
 
 向 `anything@example.net` 发一封测试邮件；日志中应看到 SMTP 接受并发布消息。POP
 客户端应设置为：服务器 `mx.example.net`、端口 `995`、SSL/TLS 为“连接时启用”（隐式
-TLS），用户名和部署时生成的 app password；不要选择明文 POP3 或 STLS。客户端必须
-启用“在服务器保留邮件”，因为 picomx 是只读归档，`DELE` 会明确失败。
+TLS），用户名和部署时生成的 app password；不要选择明文 POP3 或 STLS。客户端可以选择保留服务器邮件，或下载后删除。`DELE` 只在本会话中标记，
+正常 `QUIT` 时才批量提交删除；`RSET` 撤销标记，断线不删除。删除后原文仍保留在 Git 历史中。
 
 如果证书、端口或收件域不匹配，优先依次检查 `dig` 结果、云/主机防火墙、
 `systemctl status` 和 `journalctl`；修改证书后服务会自动热加载，无需重启。
 
-重复 POP 认证失败的可选封禁规则通过 `make deploy-fail2ban` 安装。POP 客户端必须启用
-“在服务器保留邮件”；`DELE` 会明确失败。
+重复 POP 认证失败的可选封禁规则通过 `make deploy-fail2ban` 安装。
 
-## notmuch 与 Git
+## bare Git 与历史恢复
 
-将 notmuch 的 database path 指向 `messages/` 后运行 `notmuch new` 即可索引。存档不是
-Maildir，因此 notmuch tags 只存在索引中，不会反写为文件名 flags。
+`messages/` 本身是 bare Git 仓库，没有工作目录；`state` 和 `.eml` 路径存在于 Git
+提交的树中。邮件按原始字节保存，不经过换行转换或 clean/smudge 过滤。删除区间与
+累计删除数保存在 `state` 中；`last_id` 始终递增，删除全部邮件也不会重用旧 ID。
+物理目录中的 `tmp/` 只存放未发布邮件和读取用的临时文件，不进入提交。
 
-Git 只应同步已发布的 ID 目录和 `state`。`messages/tmp/` 保存未发布写入并已由
-`.gitignore` 排除；notmuch 数据库也不应提交。当前守护进程不会执行 Git 命令或持有
-Git 凭据；有了 POP3S 后，Git 同步只是可选的归档传输方式。
+```sh
+sudo -u picomx git --git-dir=/var/lib/picomx/messages show HEAD:state
+sudo -u picomx git --git-dir=/var/lib/picomx/messages ls-tree -r HEAD
+```
+
+守护进程通过 `fast-import` 写入提交，并通过其 `ls` / `cat-blob` 读取快照。每次变更
+执行 checkpoint 并确认 HEAD 更新后才返回成功；进程空闲 30 秒后通过 EOF 退出，
+下次操作重新启动。仅查询邮件大小使用 `cat-file -s`，避免读取整封正文。
+Git 只做本地操作，禁用 hooks、fsmonitor、提交签名和自动维护，不持有 Git 凭据。
+systemd 的 `ProtectSystem=strict`、`ProtectHome=yes` 和出站 `connect(2)` 禁令保持不变。
+
+已有普通文件存档会在首次启动时导入 bare 仓库，保留原 `.eml` 文件供管理员确认；
+后续以 Git 中的 state 为准，不再读取或修改这些旧副本。确认迁移和备份后可自行
+清理旧副本。若已有带工作目录的 Git 仓库，先停服，用 `git clone --bare` 克隆到
+新目录，确认所有邮件已提交，并把 `PICOMX_ARCHIVE_ROOT` 指向新目录；picomx 不会
+自动转换或删除已有 `.git/`。
+
+查看某封已删除邮件的历史并导出原文（以下路径对应 ID 123；将 `COMMIT` 替换为仍包含
+该文件的提交）：
+
+```sh
+sudo -u picomx git --git-dir=/var/lib/picomx/messages log --oneline -- 1/07b.eml
+umask 077
+sudo -u picomx git --git-dir=/var/lib/picomx/messages show COMMIT:1/07b.eml > recovered-123.eml
+```
+
+仓库由单个 picomx 进程管理。外部写入、恢复和 Git 维护应先停止服务；不要重置或改写
+历史，以免丢失原文和复用旧 UIDL。远程备份由服务之外的程序完成，应包含完整 Git
+历史。notmuch 如有需要，可在外部检出或导出的文件树上索引，不直接索引 bare 仓库。
+
+遇到 Git 事务故障后，排除磁盘或锁文件问题并重启；picomx 从 HEAD 读取权威状态。
+提交成功但响应中断时，客户端可能认为操作失败，SMTP 重试可能产生重复邮件。
