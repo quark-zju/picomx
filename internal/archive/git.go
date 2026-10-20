@@ -123,40 +123,45 @@ func (s *Store) initializeGit() error {
 		if err != nil {
 			return err
 		}
-		s.state = state
 		changes := map[string][]byte{}
-		// Import every live legacy message before enabling deletion.
-		snapshot := Snapshot{LastID: state.LastID, deleted: state.DeletedRanges}
+		state.Directories = directoryCounts{}
 		var total uint64
-		if err := snapshot.Walk(func(number, id uint64) error {
-			path, _ := messageRelativePath(id)
+		for id := uint64(1); id != 0 && id <= state.LastID; id++ {
 			info, err := statMessage(s.root, id)
 			if err != nil {
 				return err
 			}
 			if !info.Mode().IsRegular() {
-				return fmt.Errorf("legacy message %d is not regular", id)
+				return errors.New("legacy message is not regular")
 			}
 			size := uint64(info.Size())
 			if size > ^uint64(0)-total {
 				return errors.New("legacy archive octet overflow")
 			}
 			total += size
-			changes[filepath.ToSlash(path)] = nil
-			return nil
-		}); err != nil {
-			return err
+			path, _ := messagePath(id, size)
+			changes[path] = nil
+			state.Directories.add(filepath.ToSlash(filepath.Dir(path)))
 		}
 		if total != state.TotalOctets {
 			return errors.New("legacy archive octets do not match state")
 		}
+		state.index, err = buildDirectoryIndex(state.Directories, state.LastID)
+		if err != nil {
+			return err
+		}
+		s.state = state
 		if err := s.commitChanges("mail: initialize archive", state, changes, nil); err != nil {
 			return err
 		}
 	} else {
-		data, err := s.git(nil, "cat-file", "blob", head+":state")
+		reader, err := s.readBlob(head, mailboxStateName)
 		if err != nil {
 			return fmt.Errorf("read committed mailbox state: %w", err)
+		}
+		data, readErr := io.ReadAll(reader)
+		if err := errors.Join(readErr, reader.Close()); err != nil {
+			return err
 		}
 		state, err := decodeMailboxState(bytes.NewReader(data))
 		if err != nil {
@@ -168,58 +173,40 @@ func (s *Store) initializeGit() error {
 	if err := s.validateTree(); err != nil {
 		return err
 	}
-	// Version 1 is normalized by the decoder and persisted on the next write.
 
 	return nil
 }
 
 func (s *Store) validateTree() error {
-	out, err := s.git(nil, "ls-tree", "-r", "-l", "-z", "HEAD")
-	if err != nil {
+	snapshot := s.snapshotLocked()
+	var total uint64
+	// Validate directory structure as well as counts, so hidden/unindexed mail
+	// cannot silently disappear from the POP3 view after a restart.
+	if err := s.validateDirectories(snapshot); err != nil {
 		return err
 	}
-	var total, count, previousID uint64
-	deletedIndex := 0
-	for _, entry := range bytes.Split(out, []byte{0}) {
-		if len(entry) == 0 {
-			continue
+	if err := s.ListAt(snapshot, func(number, id, size uint64) error {
+		if size > ^uint64(0)-total {
+			return errors.New("archive octet overflow")
 		}
-		metadata, path, ok := strings.Cut(string(entry), "\t")
-		if !ok {
-			return errors.New("invalid archive tree entry")
-		}
-		if path == "state" || path == ".gitignore" || path == ".gitattributes" {
-			continue
-		}
-		id, err := messageIDFromPath(path)
+		path, err := messagePath(id, size)
 		if err != nil {
 			return err
 		}
-		fields := strings.Fields(metadata)
-		if len(fields) != 4 || fields[0] != "100644" || fields[1] != "blob" {
-			return fmt.Errorf("invalid message entry %s", path)
-		}
-		size, err := strconv.ParseUint(fields[3], 10, 64)
+		actual, err := s.objectInfo(snapshot.commit+":"+path, "blob")
 		if err != nil {
 			return err
 		}
-		// Canonical base-1024 paths sort in ID order in Git's tree traversal.
-		for deletedIndex < len(s.state.DeletedRanges) && s.state.DeletedRanges[deletedIndex].End < id {
-			deletedIndex++
+		if uint64(actual.size) != size {
+			return errors.New("message size does not match filename")
 		}
-		deleted := deletedIndex < len(s.state.DeletedRanges) && s.state.DeletedRanges[deletedIndex].Start <= id
-		if id <= previousID || id > s.state.LastID || deleted || size > ^uint64(0)-total {
-			return errors.New("archive IDs or octets exceed state")
-		}
-		previousID = id
 		total += size
-		count++
+		return nil
+	}); err != nil {
+		return err
 	}
 	if total != s.state.TotalOctets {
 		return errors.New("archive octets do not match state")
-	}
-	if count != s.state.LastID-s.state.DeletedRanges.count() {
-		return errors.New("archive message count does not match state")
 	}
 	return nil
 }

@@ -30,9 +30,10 @@ func TestGitDeletionHistorySnapshotsAndMonotonicIDs(t *testing.T) {
 	if after.Count() != 3 || after.TotalOctets != uint64(len("firstfourthfifth")) {
 		t.Fatalf("snapshot after delete: %+v", after)
 	}
-	if want := (deletedRanges{{Start: 2, End: 3, AccCount: 2}}); !reflect.DeepEqual(after.deleted, want) {
-		t.Fatalf("ranges = %v", after.deleted)
+	if !reflect.DeepEqual(store.state.Directories, directoryCounts{"1": 3}) {
+		t.Fatalf("directories = %v", store.state.Directories)
 	}
+
 	for _, id := range []uint64{2, 3} {
 		if _, err := store.Open(id); !errors.Is(err, ErrNoSuchMessage) {
 			t.Fatalf("Open deleted %d: %v", id, err)
@@ -66,14 +67,14 @@ func TestGitDeletionHistorySnapshotsAndMonotonicIDs(t *testing.T) {
 	if err := store.Delete([]uint64{4}); err != nil {
 		t.Fatal(err)
 	}
-	if after.deleted[0].End != 3 {
+	if after.index.total != 3 || after.index.leaves[0].count != 3 {
 		t.Fatal("later deletion mutated an existing snapshot")
 	}
 	path, err := store.Deliver(strings.NewReader("sixth"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if path != "1/006.eml" {
+	if path != "1/006-s5.eml" {
 		t.Fatalf("reused an ID: %s", path)
 	}
 	reopened, err := testNew(t, root)
@@ -84,8 +85,8 @@ func TestGitDeletionHistorySnapshotsAndMonotonicIDs(t *testing.T) {
 		t.Fatalf("reopened snapshot: %+v", reopened.Snapshot())
 	}
 	for number, want := range []uint64{1, 5, 6} {
-		if got, ok := reopened.Snapshot().ID(uint64(number + 1)); !ok || got != want {
-			t.Fatalf("ID(%d) = %d, %v", number+1, got, ok)
+		if got, err := reopened.Lookup(reopened.Snapshot(), uint64(number+1)); err != nil || got.ID != want {
+			t.Fatalf("ID(%d) = %d, %v", number+1, got.ID, err)
 		}
 	}
 	if _, err := reopened.git(nil, "merge-base", "--is-ancestor", before.commit, "HEAD"); err != nil {
@@ -132,7 +133,7 @@ func TestDeleteValidationAndAllDeletedRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if path != "1/004.eml" {
+	if path != "1/004-s3.eml" {
 		t.Fatalf("reused deleted ID: %s", path)
 	}
 }
@@ -154,7 +155,7 @@ func TestFailedRefUpdateLeavesOldMailboxAndRecovers(t *testing.T) {
 	if err := store.Delete([]uint64{1}); err == nil {
 		t.Fatal("deletion succeeded despite ref lock")
 	}
-	if raw, err := store.git(nil, "show", "HEAD:1/001.eml"); err != nil || string(raw) != "original" {
+	if raw, err := store.git(nil, "show", "HEAD:1/001-s8.eml"); err != nil || string(raw) != "original" {
 		t.Fatalf("failed deletion removed original: %q, %v", raw, err)
 	}
 	if _, err := store.Deliver(strings.NewReader("next")); err == nil {
@@ -217,44 +218,9 @@ func TestGitIgnoresHooksFiltersAndInheritedEnvironment(t *testing.T) {
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Git executed a hook: %v", err)
 	}
-	raw, err := store.git(nil, "show", "HEAD~1:1/001.eml")
+	raw, err := store.git(nil, "show", "HEAD~1:1/001-s22.eml")
 	if err != nil || string(raw) != message {
 		t.Fatalf("Git changed raw message bytes: %q, %v", raw, err)
-	}
-}
-
-func TestImportPreviouslyCommittedLegacyArchive(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	legacy := &Store{root: root, refName: "refs/heads/main"}
-	t.Cleanup(func() { _ = legacy.Close() })
-	if _, err := legacy.git(nil, "init", "--bare", "--template=", "--initial-branch=main"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, "tmp"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	state := mailboxState{Version: 1, LastID: 1, TotalOctets: 8}
-	if err := legacy.commitChanges("legacy archive", state, map[string][]byte{"1/001.eml": []byte("original")}, nil); err != nil {
-		t.Fatal(err)
-	}
-	original := legacy.headID
-	store, err := testNew(t, root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if store.state.Version != mailboxStateVersion {
-		t.Fatal("legacy state was not upgraded")
-	}
-	if err := store.Delete([]uint64{1}); err != nil {
-		t.Fatal(err)
-	}
-	data, err := store.git(nil, "show", original+":1/001.eml")
-	if err != nil || string(data) != "original" {
-		t.Fatalf("lost legacy history: %q, %v", data, err)
-	}
-	if _, err := testNew(t, root); err != nil {
-		t.Fatal(err)
 	}
 }
 

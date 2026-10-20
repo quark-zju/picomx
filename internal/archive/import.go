@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,7 +41,7 @@ func (d *gitDiagnostics) String() string {
 	return strings.TrimSpace(string(d.data))
 }
 
-type importProcess struct {
+type gitProcess struct {
 	cmd         *exec.Cmd
 	stdin       io.WriteCloser
 	input       *bufio.Writer
@@ -51,7 +50,7 @@ type importProcess struct {
 	nextMark    uint64
 }
 
-func (s *Store) importerLocked() (*importProcess, error) {
+func (s *Store) importerLocked() (*gitProcess, error) {
 	s.idleGeneration++
 	if s.idleTimer != nil {
 		s.idleTimer.Stop()
@@ -76,7 +75,7 @@ func (s *Store) importerLocked() (*importProcess, error) {
 		_ = stdin.Close()
 		return nil, err
 	}
-	process := &importProcess{cmd: cmd, stdin: stdin, input: bufio.NewWriter(stdin), output: bufio.NewReader(stdout)}
+	process := &gitProcess{cmd: cmd, stdin: stdin, input: bufio.NewWriter(stdin), output: bufio.NewReader(stdout)}
 	cmd.Stderr = &process.diagnostics
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
@@ -88,7 +87,7 @@ func (s *Store) importerLocked() (*importProcess, error) {
 }
 
 func (s *Store) armIdleLocked() {
-	if s.importer == nil {
+	if s.importer == nil && s.reader == nil {
 		return
 	}
 	if s.idleTimer != nil {
@@ -109,6 +108,7 @@ func (s *Store) armIdleLocked() {
 		if err := s.closeImporterLocked(); err != nil {
 			s.importError = err
 		}
+		_ = s.closeReaderLocked()
 	})
 }
 
@@ -153,10 +153,10 @@ func (s *Store) Close() error {
 		s.idleTimer.Stop()
 		s.idleTimer = nil
 	}
-	return s.closeImporterLocked()
+	return errors.Join(s.closeImporterLocked(), s.closeReaderLocked())
 }
 
-func (process *importProcess) line() (string, error) {
+func (process *gitProcess) line() (string, error) {
 	line, err := process.output.ReadString('\n')
 	if err != nil {
 		return "", err
@@ -176,29 +176,7 @@ func validObjectID(id string) bool {
 	return true
 }
 
-func (process *importProcess) blobID(commit, path string) (string, error) {
-	if _, err := fmt.Fprintf(process.input, "ls %s %s\n", commit, path); err != nil {
-		return "", err
-	}
-	if err := process.input.Flush(); err != nil {
-		return "", err
-	}
-	line, err := process.line()
-	if err != nil {
-		return "", err
-	}
-	if strings.HasPrefix(line, "missing ") {
-		return "", ErrNoSuchMessage
-	}
-	metadata, returnedPath, ok := strings.Cut(line, "\t")
-	fields := strings.Fields(metadata)
-	if !ok || returnedPath != path || len(fields) != 3 || fields[0] != "100644" || fields[1] != "blob" || !validObjectID(fields[2]) {
-		return "", errors.New("invalid git ls response")
-	}
-	return fields[2], nil
-}
-
-func (process *importProcess) data(source io.Reader, size int64) error {
+func (process *gitProcess) data(source io.Reader, size int64) error {
 	if _, err := fmt.Fprintf(process.input, "data %d\n", size); err != nil {
 		return err
 	}
@@ -214,7 +192,7 @@ func (s *Store) commitChanges(title string, state mailboxState, changes map[stri
 	if s.failure != nil {
 		return s.failure
 	}
-	if err := state.DeletedRanges.validate(state.LastID); err != nil {
+	if _, err := buildDirectoryIndex(state.Directories, state.LastID); err != nil {
 		return err
 	}
 	s.gitMu.Lock()
@@ -235,7 +213,7 @@ func (s *Store) commitChanges(title string, state mailboxState, changes map[stri
 	return nil
 }
 
-func (s *Store) importCommitLocked(process *importProcess, title string, state mailboxState, changes map[string][]byte, removals []string) error {
+func (s *Store) importCommitLocked(process *gitProcess, title string, state mailboxState, changes map[string][]byte, removals []string) error {
 	data, err := json.Marshal(state)
 	if err != nil {
 		return err
@@ -265,7 +243,12 @@ func (s *Store) importCommitLocked(process *importProcess, title string, state m
 				return err
 			}
 		} else {
-			file, err := os.Open(filepath.Join(s.root, filepath.FromSlash(path)))
+			message, parseErr := messageFromPath(path)
+			if parseErr != nil {
+				return parseErr
+			}
+			legacyPath, _ := messageRelativePath(message.ID)
+			file, err := os.Open(filepath.Join(s.root, legacyPath))
 			if err != nil {
 				return err
 			}
@@ -330,69 +313,6 @@ func validArchivePath(path string) bool {
 	if path == mailboxStateName || path == ".gitignore" || path == ".gitattributes" {
 		return true
 	}
-	_, err := messageIDFromPath(path)
+	_, err := messageFromPath(path)
 	return err == nil
-}
-
-// readBlob copies a complete framed response before releasing the shared Git
-// channel. The unlinked file can then stream to a slow client independently.
-func (s *Store) readBlob(commit, path string) (io.ReadCloser, error) {
-	s.gitMu.Lock()
-	defer s.gitMu.Unlock()
-	defer s.armIdleLocked()
-	process, err := s.importerLocked()
-	if err != nil {
-		return nil, err
-	}
-	oid, err := process.blobID(commit, path)
-	if errors.Is(err, ErrNoSuchMessage) {
-		return nil, err
-	}
-	if err != nil {
-		return nil, s.abortImporterLocked(err)
-	}
-	file, err := os.CreateTemp(filepath.Join(s.root, "tmp"), ".read-*")
-	if err != nil {
-		return nil, err
-	}
-	if err := os.Remove(file.Name()); err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	succeeded := false
-	defer func() {
-		if !succeeded {
-			_ = file.Close()
-		}
-	}()
-	if _, err := fmt.Fprintf(process.input, "cat-blob %s\n", oid); err != nil {
-		return nil, s.abortImporterLocked(err)
-	}
-	if err := process.input.Flush(); err != nil {
-		return nil, s.abortImporterLocked(err)
-	}
-	header, err := process.line()
-	if err != nil {
-		return nil, s.abortImporterLocked(err)
-	}
-	fields := strings.Fields(header)
-	if len(fields) != 3 || fields[0] != oid || fields[1] != "blob" {
-		return nil, s.abortImporterLocked(errors.New("invalid git blob header"))
-	}
-	size, err := strconv.ParseInt(fields[2], 10, 64)
-	if err != nil || size < 0 {
-		return nil, s.abortImporterLocked(errors.New("invalid git blob size"))
-	}
-	if _, err := io.CopyN(file, process.output, size); err != nil {
-		return nil, s.abortImporterLocked(err)
-	}
-	end, err := process.output.ReadByte()
-	if err != nil || end != '\n' {
-		return nil, s.abortImporterLocked(errors.New("invalid git blob terminator"))
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-	succeeded = true
-	return file, nil
 }

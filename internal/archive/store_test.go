@@ -21,7 +21,7 @@ func TestDeliverPublishesSequentialMessageAndState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := path, "1/001.eml"; got != want {
+	if got, want := path, "1/001-s35.eml"; got != want {
 		t.Fatalf("message path = %q, want %q", got, want)
 	}
 	content, err := store.git(nil, "cat-file", "blob", "HEAD:"+path)
@@ -69,10 +69,10 @@ func TestDeliverUsesSequentialIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := first, "1/001.eml"; got != want {
+	if got, want := first, "1/001-s5.eml"; got != want {
 		t.Fatalf("first path = %q, want %q", got, want)
 	}
-	if got, want := second, "1/002.eml"; got != want {
+	if got, want := second, "1/002-s6.eml"; got != want {
 		t.Fatalf("second path = %q, want %q", got, want)
 	}
 	state := store.state

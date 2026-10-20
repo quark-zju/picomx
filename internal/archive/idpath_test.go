@@ -40,3 +40,24 @@ func TestMessageRelativePathRejectsZero(t *testing.T) {
 		t.Fatal("messageRelativePath(0) succeeded")
 	}
 }
+
+func TestSizedMessagePathsRoundTrip(t *testing.T) {
+	t.Parallel()
+	for _, id := range []uint64{1, 1023, 1024, 1025, 1024 * 1024, math.MaxUint64} {
+		for _, size := range []uint64{0, 123, math.MaxUint64} {
+			path, err := messagePath(id, size)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := messageFromPath(path)
+			if err != nil || got.ID != id || got.Size != size || got.Path != path {
+				t.Fatalf("round trip %q = %+v, %v", path, got, err)
+			}
+		}
+	}
+	for _, path := range []string{"1/001.eml", "1/001-s01.eml", "1/001-s-1.eml", "1/001-s18446744073709551616.eml", "1/000-s1.eml", "2/000/001-s1.eml", "1/001-s1", "../001-s1.eml", "1/001-s1.eml/x"} {
+		if _, err := messageFromPath(path); err == nil {
+			t.Fatalf("accepted %q", path)
+		}
+	}
+}

@@ -15,10 +15,11 @@ const (
 )
 
 type mailboxState struct {
-	Version       int           `json:"version"`
-	LastID        uint64        `json:"last_id"`
-	TotalOctets   uint64        `json:"total_octets"`
-	DeletedRanges deletedRanges `json:"deleted_ranges,omitempty"`
+	Version     int             `json:"version"`
+	LastID      uint64          `json:"last_id"`
+	TotalOctets uint64          `json:"total_octets"`
+	Directories directoryCounts `json:"directories,omitempty"`
+	index       *directoryIndex
 }
 
 func emptyMailboxState() mailboxState {
@@ -35,7 +36,23 @@ func readMailboxState(root string) (mailboxState, error) {
 	}
 	defer file.Close()
 
-	return decodeMailboxState(file)
+	var legacy struct {
+		Version     int    `json:"version"`
+		LastID      uint64 `json:"last_id"`
+		TotalOctets uint64 `json:"total_octets"`
+	}
+	decoder := json.NewDecoder(file)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&legacy); err != nil {
+		return mailboxState{}, err
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return mailboxState{}, err
+	}
+	if legacy.Version != 1 || (legacy.LastID == 0 && legacy.TotalOctets != 0) {
+		return mailboxState{}, errors.New("invalid legacy mailbox state")
+	}
+	return mailboxState{Version: mailboxStateVersion, LastID: legacy.LastID, TotalOctets: legacy.TotalOctets}, nil
 }
 
 func decodeMailboxState(source io.Reader) (mailboxState, error) {
@@ -48,19 +65,17 @@ func decodeMailboxState(source io.Reader) (mailboxState, error) {
 	if err := ensureJSONEOF(decoder); err != nil {
 		return mailboxState{}, fmt.Errorf("decode mailbox state: %w", err)
 	}
-	if state.Version != 1 && state.Version != mailboxStateVersion {
-		return mailboxState{}, fmt.Errorf("unsupported mailbox state version %d", state.Version)
+	if state.Version != mailboxStateVersion {
+		return mailboxState{}, errors.New("unsupported Git mailbox state version")
 	}
-	if state.Version == 1 && len(state.DeletedRanges) != 0 {
-		return mailboxState{}, errors.New("legacy state cannot contain deleted ranges")
-	}
-	if err := state.DeletedRanges.validate(state.LastID); err != nil {
+	index, err := buildDirectoryIndex(state.Directories, state.LastID)
+	if err != nil {
 		return mailboxState{}, err
 	}
-	if state.LastID == state.DeletedRanges.count() && state.TotalOctets != 0 {
-		return mailboxState{}, errors.New("empty mailbox state has nonzero total octets")
+	if index.total == 0 && state.TotalOctets != 0 {
+		return mailboxState{}, errors.New("empty mailbox has nonzero octets")
 	}
-	state.Version = mailboxStateVersion
+	state.index = index
 	return state, nil
 }
 
@@ -95,7 +110,12 @@ func writeMailboxState(root string, state mailboxState) (err error) {
 		_ = os.Remove(tmpPath)
 	}()
 
-	if err := json.NewEncoder(file).Encode(state); err != nil {
+	legacy := struct {
+		Version     int    `json:"version"`
+		LastID      uint64 `json:"last_id"`
+		TotalOctets uint64 `json:"total_octets"`
+	}{1, state.LastID, state.TotalOctets}
+	if err := json.NewEncoder(file).Encode(legacy); err != nil {
 		return fmt.Errorf("encode mailbox state: %w", err)
 	}
 	if err := file.Sync(); err != nil {

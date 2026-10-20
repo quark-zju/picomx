@@ -22,12 +22,14 @@ type Store struct {
 	failure        error
 	refName        string
 	gitMu          sync.Mutex
-	importer       *importProcess
+	importer       *gitProcess
+	reader         *gitProcess
 	importError    error
 	closed         bool
 	idleTimer      *time.Timer
 	idleGeneration uint64
 	idleTimeout    time.Duration
+	cache          *directoryCache
 }
 
 // StagedMessage is a complete synced message that is not visible in the mailbox.
@@ -56,7 +58,7 @@ func New(root string) (*Store, error) {
 	if err := os.MkdirAll(absolute, 0o700); err != nil {
 		return nil, err
 	}
-	store := &Store{root: absolute}
+	store := &Store{root: absolute, cache: newDirectoryCache(directoryCacheCapacity)}
 	if err := store.initializeGit(); err != nil {
 		_ = store.Close()
 		return nil, err
@@ -153,7 +155,7 @@ func (s *Store) Publish(staged Staged) (id uint64, finalPath string, err error) 
 		return 0, "", errors.New("message ID space exhausted")
 	}
 	nextID := s.state.LastID + 1
-	relativePath, err := messageRelativePath(nextID)
+	relativePath, err := messagePath(nextID, message.size)
 	if err != nil {
 		return 0, "", err
 	}
@@ -163,12 +165,17 @@ func (s *Store) Publish(staged Staged) (id uint64, finalPath string, err error) 
 	}
 
 	nextState := mailboxState{
-		Version:       mailboxStateVersion,
-		LastID:        nextID,
-		TotalOctets:   s.state.TotalOctets + message.size,
-		DeletedRanges: s.state.DeletedRanges,
+		Version:     mailboxStateVersion,
+		LastID:      nextID,
+		TotalOctets: s.state.TotalOctets + message.size,
+		Directories: cloneDirectoryCounts(s.state.Directories),
 	}
-	// Hash the staged bytes without materializing a working copy.
+	nextState.Directories.add(filepath.ToSlash(filepath.Dir(relativePath)))
+	nextState.index, err = buildDirectoryIndex(nextState.Directories, nextState.LastID)
+	if err != nil {
+		return 0, "", err
+	}
+	// Git receives the staged bytes directly; no working copy is published.
 	content, err := os.ReadFile(message.path)
 	if err != nil {
 		return 0, "", err

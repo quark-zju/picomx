@@ -25,7 +25,7 @@ func TestImporterExitsOnIdleAndRestartsFromCommittedHEAD(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		store.gitMu.Lock()
-		idle := store.importer == nil
+		idle := store.importer == nil && store.reader == nil
 		exitErr := store.importError
 		store.gitMu.Unlock()
 		if idle {
@@ -56,7 +56,7 @@ func TestImporterExitsOnIdleAndRestartsFromCommittedHEAD(t *testing.T) {
 	}
 }
 
-func TestReadSpoolReleasesImporterBeforeClientConsumesMessage(t *testing.T) {
+func TestReadPipeDrainsEarlyCloseBeforeReusingReader(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	store, err := testNew(t, root)
@@ -72,26 +72,74 @@ func TestReadSpoolReleasesImporterBeforeClientConsumesMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
+	prefix := make([]byte, 17)
+	if _, err := io.ReadFull(file, prefix); err != nil || !bytes.Equal(prefix, body[:17]) {
+		t.Fatalf("pipe prefix: %q, %v", prefix, err)
+	}
 	done := make(chan error, 1)
 	go func() { _, err := store.Deliver(strings.NewReader("second")); done <- err }()
+	select {
+	case err := <-done:
+		t.Fatalf("write bypassed the leased Git pipe: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatal(err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("unconsumed POP body blocked the Git writer")
+		t.Fatal("closing the Git reader did not release the writer")
 	}
-	data, err := io.ReadAll(file)
-	if err != nil || !bytes.Equal(data, body) {
-		t.Fatalf("binary message changed: length %d, error %v", len(data), err)
+	again, err := store.Open(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(again)
+	closeErr := again.Close()
+	if err != nil || closeErr != nil || !bytes.Equal(data, body) {
+		t.Fatalf("binary pipe response changed: size %d, errors %v/%v", len(data), err, closeErr)
 	}
 	entries, err := os.ReadDir(filepath.Join(root, "tmp"))
 	if err != nil || len(entries) != 0 {
-		t.Fatalf("temporary files leaked: %v, %v", entries, err)
+		t.Fatalf("unexpected temporary files: %v, %v", entries, err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "index")); !os.IsNotExist(err) {
-		t.Fatal("importer created an index")
+}
+
+func TestReadPipeEmptyBlobAndUnreadClose(t *testing.T) {
+	t.Parallel()
+	store, err := testNew(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{"", "unread\x00body"} {
+		if _, err := store.Deliver(strings.NewReader(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []uint64{1, 2, 1} {
+		file, err := store.Open(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file, err := store.Open(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil || string(data) != "unread\x00body" {
+		t.Fatalf("framing after unread close: %q, %v", data, err)
 	}
 }
 
@@ -129,5 +177,32 @@ func TestImporterCrashRequiresReopenAndKeepsAcceptedMail(t *testing.T) {
 	data, err := io.ReadAll(file)
 	if err != nil || string(data) != "accepted" {
 		t.Fatalf("accepted mail = %q, %v", data, err)
+	}
+}
+
+func TestReaderCrashCanRestartWithoutPoisoningWriter(t *testing.T) {
+	t.Parallel()
+	store, err := testNew(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver(strings.NewReader("first")); err != nil {
+		t.Fatal(err)
+	}
+	store.gitMu.Lock()
+	err = store.reader.cmd.Process.Kill()
+	store.gitMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Lookup(store.Snapshot(), 1); err == nil {
+		t.Fatal("query succeeded after reader was killed")
+	}
+	if _, err := store.Deliver(strings.NewReader("second")); err != nil {
+		t.Fatal(err)
+	}
+	message, err := store.Lookup(store.Snapshot(), 2)
+	if err != nil || message.ID != 2 {
+		t.Fatalf("reader restart: %+v, %v", message, err)
 	}
 }

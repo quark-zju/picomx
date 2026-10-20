@@ -37,7 +37,7 @@ func TestNewRecoversOnePublishedTailMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := path, "1/002.eml"; got != want {
+	if got, want := path, "1/002-s6.eml"; got != want {
 		t.Fatalf("next path = %q, want %q", got, want)
 	}
 }

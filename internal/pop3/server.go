@@ -24,8 +24,9 @@ const (
 
 type mailbox interface {
 	Snapshot() archive.Snapshot
-	SizeAt(archive.Snapshot, uint64) (uint64, error)
-	OpenAt(archive.Snapshot, uint64) (io.ReadCloser, error)
+	ListAt(archive.Snapshot, func(number, id, size uint64) error) error
+	Lookup(archive.Snapshot, uint64) (archive.Message, error)
+	OpenMessage(archive.Snapshot, archive.Message) (io.ReadCloser, error)
 	Delete([]uint64) error
 }
 
@@ -133,7 +134,7 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 	var username string
 	var authenticated bool
 	var snapshot archive.Snapshot
-	deleted := map[uint64]bool{}
+	deleted := map[uint64]uint64{}
 	var deletedOctets uint64
 	authFailures := 0
 
@@ -220,7 +221,7 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 			}
 			if argument != "" {
 				id, ok := messageID(argument, snapshot.Count())
-				if !ok || deleted[id] {
+				if !ok || deleted[id] != 0 {
 					s.reply(conn, writer, "-ERR no such message")
 					continue
 				}
@@ -232,12 +233,17 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 				s.reply(conn, writer, fmt.Sprintf("+OK %d %d", id, size))
 				continue
 			}
-			if !s.writeListing(conn, writer, snapshot, deleted, func(id, permanentID uint64) (string, error) {
-				size, err := s.mailbox.SizeAt(snapshot, permanentID)
-				return fmt.Sprintf("%d %d", id, size), err
+			if !s.writeListing(conn, writer, func(row func(string) error) error {
+				return s.mailbox.ListAt(snapshot, func(number, id, size uint64) error {
+					if deleted[number] != 0 {
+						return nil
+					}
+					return row(fmt.Sprintf("%d %d", number, size))
+				})
 			}) {
 				return
 			}
+
 		case "UIDL":
 			if !authenticated {
 				s.reply(conn, writer, "-ERR authenticate first")
@@ -245,39 +251,50 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 			}
 			if argument != "" {
 				id, ok := messageID(argument, snapshot.Count())
-				if !ok || deleted[id] {
+				if !ok || deleted[id] != 0 {
 					s.reply(conn, writer, "-ERR no such message")
 					continue
 				}
-				s.reply(conn, writer, fmt.Sprintf("+OK %d %s", id, snapshotUID(snapshot, id)))
+				message, err := s.mailbox.Lookup(snapshot, id)
+				if err != nil {
+					s.reply(conn, writer, "-ERR unable to inspect message")
+					continue
+				}
+				s.reply(conn, writer, fmt.Sprintf("+OK %d %s", id, uniqueID(message.ID)))
 				continue
 			}
-			if !s.writeListing(conn, writer, snapshot, deleted, func(id, permanentID uint64) (string, error) {
-				return fmt.Sprintf("%d %s", id, uniqueID(permanentID)), nil
+			if !s.writeListing(conn, writer, func(row func(string) error) error {
+				return s.mailbox.ListAt(snapshot, func(number, id, size uint64) error {
+					if deleted[number] != 0 {
+						return nil
+					}
+					return row(fmt.Sprintf("%d %s", number, uniqueID(id)))
+				})
 			}) {
 				return
 			}
+
 		case "RETR":
 			if !authenticated {
 				s.reply(conn, writer, "-ERR authenticate first")
 				continue
 			}
 			id, ok := messageID(argument, snapshot.Count())
-			if !ok || deleted[id] {
+			if !ok || deleted[id] != 0 {
 				s.reply(conn, writer, "-ERR no such message")
 				continue
 			}
-			size, err := s.messageSize(snapshot, id)
+			message, err := s.mailbox.Lookup(snapshot, id)
 			if err != nil {
 				s.reply(conn, writer, "-ERR unable to inspect message")
 				continue
 			}
-			file, err := s.openMessage(snapshot, id)
+			file, err := s.mailbox.OpenMessage(snapshot, message)
 			if err != nil {
 				s.reply(conn, writer, "-ERR unable to open message")
 				continue
 			}
-			ok = s.streamMessage(conn, writer, file, fmt.Sprintf("+OK %d octets", size), nil)
+			ok = s.streamMessage(conn, writer, file, fmt.Sprintf("+OK %d octets", message.Size), nil)
 			_ = file.Close()
 			if !ok {
 				return
@@ -288,7 +305,7 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 				continue
 			}
 			id, bodyLines, ok := topArguments(argument, snapshot.Count())
-			if !ok || deleted[id] {
+			if !ok || deleted[id] != 0 {
 				s.reply(conn, writer, "-ERR invalid arguments")
 				continue
 			}
@@ -308,24 +325,24 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 				continue
 			}
 			id, ok := messageID(argument, snapshot.Count())
-			if !ok || deleted[id] {
+			if !ok || deleted[id] != 0 {
 				s.reply(conn, writer, "-ERR no such message")
 				continue
 			}
-			size, err := s.messageSize(snapshot, id)
+			message, err := s.mailbox.Lookup(snapshot, id)
 			if err != nil {
 				s.reply(conn, writer, "-ERR unable to inspect message")
 				continue
 			}
-			deleted[id] = true
-			deletedOctets += size
+			deleted[id] = message.ID
+			deletedOctets += message.Size
 			s.reply(conn, writer, "+OK message marked for deletion")
 		case "RSET":
 			if !authenticated || argument != "" {
 				s.reply(conn, writer, "-ERR command not valid now")
 				continue
 			}
-			deleted = map[uint64]bool{}
+			deleted = map[uint64]uint64{}
 			deletedOctets = 0
 			s.reply(conn, writer, "+OK no messages deleted")
 		case "NOOP":
@@ -341,8 +358,7 @@ func (s *Server) serveConn(conn net.Conn, tlsVersion uint16) {
 			}
 			if authenticated && len(deleted) > 0 {
 				ids := make([]uint64, 0, len(deleted))
-				for number := range deleted {
-					permanentID, _ := snapshot.ID(number)
+				for _, permanentID := range deleted {
 					ids = append(ids, permanentID)
 				}
 				if err := s.mailbox.Delete(ids); err != nil {
@@ -405,22 +421,15 @@ func (s *Server) replyMulti(conn net.Conn, writer *bufio.Writer, lines []string)
 	return writer.Flush() == nil
 }
 
-func (s *Server) writeListing(conn net.Conn, writer *bufio.Writer, snapshot archive.Snapshot, deleted map[uint64]bool, row func(uint64, uint64) (string, error)) bool {
+func (s *Server) writeListing(conn net.Conn, writer *bufio.Writer, visit func(func(string) error) error) bool {
 	if err := conn.SetWriteDeadline(time.Now().Add(s.idleTimeout)); err != nil {
 		return false
 	}
 	if _, err := writer.WriteString("+OK listing follows\r\n"); err != nil {
 		return false
 	}
-	err := snapshot.Walk(func(number, id uint64) error {
-		if deleted[number] {
-			return nil
-		}
-		line, err := row(number, id)
-		if err != nil {
-			return err
-		}
-		_, err = writer.WriteString(line + "\r\n")
+	err := visit(func(line string) error {
+		_, err := writer.WriteString(line + "\r\n")
 		return err
 	})
 	if err != nil {
@@ -433,24 +442,16 @@ func (s *Server) writeListing(conn net.Conn, writer *bufio.Writer, snapshot arch
 }
 
 func (s *Server) messageSize(snapshot archive.Snapshot, number uint64) (uint64, error) {
-	id, ok := snapshot.ID(number)
-	if !ok {
-		return 0, archive.ErrNoSuchMessage
-	}
-	return s.mailbox.SizeAt(snapshot, id)
+	message, err := s.mailbox.Lookup(snapshot, number)
+	return message.Size, err
 }
 
 func (s *Server) openMessage(snapshot archive.Snapshot, number uint64) (io.ReadCloser, error) {
-	id, ok := snapshot.ID(number)
-	if !ok {
-		return nil, archive.ErrNoSuchMessage
+	message, err := s.mailbox.Lookup(snapshot, number)
+	if err != nil {
+		return nil, err
 	}
-	return s.mailbox.OpenAt(snapshot, id)
-}
-
-func snapshotUID(snapshot archive.Snapshot, number uint64) string {
-	id, _ := snapshot.ID(number)
-	return uniqueID(id)
+	return s.mailbox.OpenMessage(snapshot, message)
 }
 
 func messageID(argument string, lastID uint64) (uint64, bool) {

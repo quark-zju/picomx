@@ -53,3 +53,33 @@ func messageIDFromPath(path string) (uint64, error) {
 	}
 	return id, nil
 }
+
+// messagePath embeds immutable size metadata in the Git tree entry name.
+func messagePath(id, size uint64) (string, error) {
+	path, err := messageRelativePath(id)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(filepath.ToSlash(path), ".eml") + "-s" + strconv.FormatUint(size, 10) + ".eml", nil
+}
+
+func messageFromPath(path string) (Message, error) {
+	stem := strings.TrimSuffix(path, ".eml")
+	position := strings.LastIndex(stem, "-s")
+	if position < 0 {
+		return Message{}, errors.New("message path has no size")
+	}
+	id, err := messageIDFromPath(stem[:position] + ".eml")
+	if err != nil {
+		return Message{}, err
+	}
+	size, err := strconv.ParseUint(stem[position+2:], 10, 64)
+	if err != nil {
+		return Message{}, err
+	}
+	expected, err := messagePath(id, size)
+	if err != nil || expected != path {
+		return Message{}, errors.New("invalid message filename")
+	}
+	return Message{ID: id, Size: size, Path: path}, nil
+}

@@ -21,22 +21,41 @@ import (
 )
 
 type fakeMailbox struct {
-	snapshot    archive.Snapshot
-	sizes       map[uint64]uint64
-	deleteError error
+	snapshot        archive.Snapshot
+	sizes           map[uint64]uint64
+	deleteError     error
+	singleSizeError error
 }
 
 func (m fakeMailbox) Delete([]uint64) error { return m.deleteError }
 
-func (m fakeMailbox) Snapshot() archive.Snapshot { return m.snapshot }
-func (m fakeMailbox) SizeAt(_ archive.Snapshot, id uint64) (uint64, error) {
-	size, ok := m.sizes[id]
-	if !ok {
-		return 0, archive.ErrNoSuchMessage
-	}
-	return size, nil
+func (m fakeMailbox) Snapshot() archive.Snapshot {
+	snapshot := m.snapshot
+	snapshot.MessageCount = snapshot.LastID
+	return snapshot
 }
-func (m fakeMailbox) OpenAt(archive.Snapshot, uint64) (io.ReadCloser, error) {
+func (m fakeMailbox) Lookup(snapshot archive.Snapshot, id uint64) (archive.Message, error) {
+	if m.singleSizeError != nil {
+		return archive.Message{}, m.singleSizeError
+	}
+	if id == 0 || id > snapshot.Count() {
+		return archive.Message{}, archive.ErrNoSuchMessage
+	}
+	return archive.Message{ID: id, Size: m.sizes[id]}, nil
+}
+func (m fakeMailbox) ListAt(snapshot archive.Snapshot, visit func(number, id, size uint64) error) error {
+	for id := uint64(1); id <= snapshot.Count(); id++ {
+		size, ok := m.sizes[id]
+		if !ok {
+			return archive.ErrNoSuchMessage
+		}
+		if err := visit(id, id, size); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (m fakeMailbox) OpenMessage(archive.Snapshot, archive.Message) (io.ReadCloser, error) {
 	return nil, archive.ErrNoSuchMessage
 }
 
@@ -418,6 +437,8 @@ func TestConcurrentSessionsKeepSnapshotsAndMergeDeletions(t *testing.T) {
 	expectLine(t, ar, "+OK bye")
 
 	// B retains the original numbering, sizes and content after A's removal.
+	writeLine(t, b, "LIST")
+	expectLines(t, br, "+OK listing follows", fmt.Sprintf("1 %d", len(messages[0])), fmt.Sprintf("2 %d", len(messages[1])), fmt.Sprintf("3 %d", len(messages[2])), ".")
 	writeLine(t, b, "STAT")
 	expectLine(t, br, fmt.Sprintf("+OK 3 %d", len(messages[0])+len(messages[1])+len(messages[2])))
 	writeLine(t, b, "RETR 2")
@@ -512,4 +533,22 @@ func testArchive(t *testing.T, root string) (*archive.Store, error) {
 		t.Cleanup(func() { _ = store.Close() })
 	}
 	return store, err
+}
+
+func TestFullListUsesBatchMetadata(t *testing.T) {
+	t.Parallel()
+	server, err := NewServer(Options{
+		Hostname: "pop.example.com", Credentials: testCredentials(t, "alice", "password"),
+		Mailbox: fakeMailbox{snapshot: archive.Snapshot{LastID: 2, TotalOctets: 30}, sizes: map[uint64]uint64{1: 10, 2: 20}, singleSizeError: errors.New("unexpected individual size query")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, responses := startSession(t, server)
+	expectLine(t, responses, "+OK pop.example.com picomx ready")
+	login(t, client, responses, "alice", "password")
+	writeLine(t, client, "LIST")
+	expectLines(t, responses, "+OK listing follows", "1 10", "2 20", ".")
+	writeLine(t, client, "QUIT")
+	expectLine(t, responses, "+OK bye")
 }

@@ -89,6 +89,9 @@ func TestMailboxReadsCommittedBlobInsteadOfUntrackedFiles(t *testing.T) {
 	if err != nil || string(content) != "message" {
 		t.Fatalf("committed content = %q, %v", content, err)
 	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if size, err := store.Size(1); err != nil || size != 7 {
 		t.Fatalf("committed size = %d, %v", size, err)
 	}

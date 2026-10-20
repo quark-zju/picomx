@@ -24,7 +24,7 @@ func TestWriteMailboxStateRoundTrips(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	want := mailboxState{Version: mailboxStateVersion, LastID: 42, TotalOctets: 12345, DeletedRanges: deletedRanges{{Start: 3, End: 5, AccCount: 3}, {Start: 8, End: 9, AccCount: 5}}}
+	want := mailboxState{Version: mailboxStateVersion, LastID: 42, TotalOctets: 12345}
 	if err := writeMailboxState(root, want); err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,29 @@ func TestReadLegacyStateUpgradesWithoutReassigningIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Version != mailboxStateVersion || state.LastID != 123 || state.TotalOctets != 456 || len(state.DeletedRanges) != 0 {
+	if state.Version != mailboxStateVersion || state.LastID != 123 || state.TotalOctets != 456 || len(state.Directories) != 0 {
 		t.Fatalf("legacy state = %+v", state)
+	}
+}
+
+func TestDecodeGitStateUsesDirectoryCounts(t *testing.T) {
+	t.Parallel()
+	state, err := decodeMailboxState(strings.NewReader(`{"version":2,"last_id":1026,"total_octets":7,"directories":{"1":2,"2":1,"2/001":1}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.index.total != 3 || state.index.leaves[1].accumulated != 3 {
+		t.Fatalf("index = %+v", state.index)
+	}
+	for _, content := range []string{
+		`{"version":1,"last_id":0,"total_octets":0}`,
+		`{"version":2,"last_id":1,"total_octets":1,"deleted_ranges":[]}`,
+		`{"version":2,"last_id":1,"total_octets":1}`,
+		`{"version":2,"last_id":1024,"total_octets":1,"directories":{"2/001":1}}`,
+		`{"version":2,"last_id":0,"total_octets":0} {}`,
+	} {
+		if _, err := decodeMailboxState(strings.NewReader(content)); err == nil {
+			t.Fatalf("accepted %s", content)
+		}
 	}
 }
