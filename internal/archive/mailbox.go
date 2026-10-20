@@ -112,33 +112,53 @@ func (s *Store) ListAt(snapshot Snapshot, visit func(number, id, size uint64) er
 // Delete merges removals into the latest tree. An ID absent from its leaf is
 // already deleted; no persistent per-message tombstone is necessary.
 func (s *Store) Delete(ids []uint64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	ids = append([]uint64(nil), ids...)
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for {
+		snapshot := s.Snapshot()
+		var messages []Message
+		var previous uint64
+		for _, id := range ids {
+			if id == 0 || id > snapshot.LastID {
+				return ErrNoSuchMessage
+			}
+			if id == previous {
+				continue
+			}
+			previous = id
+			message, err := s.messageByID(snapshot, id)
+			if errors.Is(err, ErrNoSuchMessage) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			messages = append(messages, message)
+		}
+		// Resolving paths may wait for a streaming reader. Never hold the state
+		// lock across that wait; retry against a newer snapshot if a writer ran.
+		s.mu.Lock()
+		if s.headID != snapshot.commit {
+			s.mu.Unlock()
+			continue
+		}
+		err := s.deleteLocked(messages)
+		s.mu.Unlock()
+		return err
+	}
+}
+
+func (s *Store) deleteLocked(messages []Message) error {
 	if s.failure != nil {
 		return s.failure
 	}
-	ids = append([]uint64(nil), ids...)
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	snapshot := s.snapshotLocked()
+	if len(messages) == 0 {
+		return nil
+	}
 	next := s.state
 	next.Directories = cloneDirectoryCounts(s.state.Directories)
-	var paths []string
-	var previous uint64
-	for _, id := range ids {
-		if id == 0 || id > s.state.LastID {
-			return ErrNoSuchMessage
-		}
-		if id == previous {
-			continue
-		}
-		previous = id
-		message, err := s.messageByID(snapshot, id)
-		if errors.Is(err, ErrNoSuchMessage) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
+	paths := make([]string, 0, len(messages))
+	for _, message := range messages {
 		if message.Size > next.TotalOctets {
 			return errors.New("message size exceeds mailbox octets")
 		}
@@ -147,9 +167,6 @@ func (s *Store) Delete(ids []uint64) error {
 			return err
 		}
 		paths = append(paths, message.Path)
-	}
-	if len(paths) == 0 {
-		return nil
 	}
 	var err error
 	next.index, err = buildDirectoryIndex(next.Directories, next.LastID)

@@ -70,9 +70,9 @@ func TestListAtReusesReaderAndPinsSnapshot(t *testing.T) {
 	}
 	// After idle shutdown, a directory miss restarts just one reader, and
 	// subsequent LIST/UIDL operations reuse it even when switching snapshots.
-	store.gitMu.Lock()
+	store.readMu.Lock()
 	err = store.closeReaderLocked()
-	store.gitMu.Unlock()
+	store.readMu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}

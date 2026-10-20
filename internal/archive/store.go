@@ -15,24 +15,29 @@ import (
 
 // Store writes immutable messages under deterministic, sequential ID paths.
 type Store struct {
-	root           string
-	mu             sync.Mutex
-	state          mailboxState
-	headID         string
-	failure        error
-	refName        string
-	gitMu          sync.Mutex
-	importer       *gitProcess
-	reader         *gitProcess
-	importError    error
-	closed         bool
-	idleTimer      *time.Timer
-	idleGeneration uint64
-	idleTimeout    time.Duration
-	cache          *directoryCache
-	maxDailyBytes  uint64
-	reservedBytes  uint64
-	now            func() time.Time
+	root               string
+	mu                 sync.Mutex
+	state              mailboxState
+	headID             string
+	failure            error
+	refName            string
+	gitMu              sync.Mutex
+	readMu             sync.Mutex
+	readClosed         bool
+	readIdleTimer      *time.Timer
+	readIdleGeneration uint64
+	readIdleTimeout    time.Duration
+	importer           *gitProcess
+	reader             *gitProcess
+	importError        error
+	closed             bool
+	idleTimer          *time.Timer
+	idleGeneration     uint64
+	idleTimeout        time.Duration
+	cache              *directoryCache
+	maxDailyBytes      uint64
+	reservedBytes      uint64
+	now                func() time.Time
 }
 
 // StagedMessage is a complete synced message that is not visible in the mailbox.

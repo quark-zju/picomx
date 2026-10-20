@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type objectHeader struct {
@@ -18,12 +19,12 @@ type objectHeader struct {
 // --batch-command (Git >= 2.36) lets one reader answer metadata and contents
 // requests for blobs and trees. No new child is needed for a directory miss.
 func (s *Store) readerLocked() (*gitProcess, error) {
-	s.idleGeneration++
-	if s.idleTimer != nil {
-		s.idleTimer.Stop()
-		s.idleTimer = nil
+	s.readIdleGeneration++
+	if s.readIdleTimer != nil {
+		s.readIdleTimer.Stop()
+		s.readIdleTimer = nil
 	}
-	if s.closed {
+	if s.readClosed {
 		return nil, errors.New("archive is closed")
 	}
 	if s.reader != nil {
@@ -104,9 +105,9 @@ func (process *gitProcess) queryObject(command, spec, kind string) (objectHeader
 }
 
 func (s *Store) objectInfo(spec, kind string) (objectHeader, error) {
-	s.gitMu.Lock()
-	defer s.gitMu.Unlock()
-	defer s.armIdleLocked()
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+	defer s.armReadIdleLocked()
 	process, err := s.readerLocked()
 	if err != nil {
 		return objectHeader{}, err
@@ -121,12 +122,12 @@ func (s *Store) objectInfo(spec, kind string) (objectHeader, error) {
 // readObject leases the response pipe until Close; closing an unread/partial
 // object drains its framing so the next request starts at a header boundary.
 func (s *Store) readObject(spec, kind string) (*blobReader, error) {
-	s.gitMu.Lock()
+	s.readMu.Lock()
 	leased := false
 	defer func() {
 		if !leased {
-			s.armIdleLocked()
-			s.gitMu.Unlock()
+			s.armReadIdleLocked()
+			s.readMu.Unlock()
 		}
 	}()
 	process, err := s.readerLocked()
@@ -183,8 +184,8 @@ func (reader *blobReader) Close() error {
 		return reader.closeError
 	}
 	reader.closed = true
-	defer reader.store.gitMu.Unlock()
-	defer reader.store.armIdleLocked()
+	defer reader.store.readMu.Unlock()
+	defer reader.store.armReadIdleLocked()
 	_, err := io.CopyN(io.Discard, reader.process.output, reader.remaining)
 	if err == nil {
 		var end byte
@@ -197,4 +198,26 @@ func (reader *blobReader) Close() error {
 		reader.closeError = reader.store.abortReaderLocked(err)
 	}
 	return reader.closeError
+}
+
+func (s *Store) armReadIdleLocked() {
+	if s.reader == nil || s.readClosed {
+		return
+	}
+	if s.readIdleTimer != nil {
+		s.readIdleTimer.Stop()
+	}
+	s.readIdleGeneration++
+	generation := s.readIdleGeneration
+	delay := s.readIdleTimeout
+	if delay <= 0 {
+		delay = gitIdleTimeout
+	}
+	s.readIdleTimer = time.AfterFunc(delay, func() {
+		s.readMu.Lock()
+		defer s.readMu.Unlock()
+		if s.readIdleGeneration == generation {
+			_ = s.closeReaderLocked()
+		}
+	})
 }

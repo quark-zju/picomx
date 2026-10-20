@@ -87,7 +87,7 @@ func (s *Store) importerLocked() (*gitProcess, error) {
 }
 
 func (s *Store) armIdleLocked() {
-	if s.importer == nil && s.reader == nil {
+	if s.importer == nil {
 		return
 	}
 	if s.idleTimer != nil {
@@ -108,7 +108,6 @@ func (s *Store) armIdleLocked() {
 		if err := s.closeImporterLocked(); err != nil {
 			s.importError = err
 		}
-		_ = s.closeReaderLocked()
 	})
 }
 
@@ -146,14 +145,23 @@ func (s *Store) abortImporterLocked(cause error) error {
 // Close ends the idle timer and gracefully stops the optional child process.
 func (s *Store) Close() error {
 	s.gitMu.Lock()
-	defer s.gitMu.Unlock()
 	s.closed = true
 	s.idleGeneration++
 	if s.idleTimer != nil {
 		s.idleTimer.Stop()
 		s.idleTimer = nil
 	}
-	return errors.Join(s.closeImporterLocked(), s.closeReaderLocked())
+	writeErr := s.closeImporterLocked()
+	s.gitMu.Unlock()
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+	s.readClosed = true
+	s.readIdleGeneration++
+	if s.readIdleTimer != nil {
+		s.readIdleTimer.Stop()
+		s.readIdleTimer = nil
+	}
+	return errors.Join(writeErr, s.closeReaderLocked())
 }
 
 func (process *gitProcess) line() (string, error) {

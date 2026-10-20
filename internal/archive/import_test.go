@@ -18,6 +18,10 @@ func TestImporterExitsOnIdleAndRestartsFromCommittedHEAD(t *testing.T) {
 	}
 	store.gitMu.Lock()
 	store.idleTimeout = 20 * time.Millisecond
+	store.readMu.Lock()
+	store.readIdleTimeout = 20 * time.Millisecond
+	store.armReadIdleLocked()
+	store.readMu.Unlock()
 	store.gitMu.Unlock()
 	if _, err := store.Deliver(strings.NewReader("first")); err != nil {
 		t.Fatal(err)
@@ -25,7 +29,10 @@ func TestImporterExitsOnIdleAndRestartsFromCommittedHEAD(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		store.gitMu.Lock()
-		idle := store.importer == nil && store.reader == nil
+		idle := store.importer == nil
+		store.readMu.Lock()
+		idle = idle && store.reader == nil
+		store.readMu.Unlock()
 		exitErr := store.importError
 		store.gitMu.Unlock()
 		if idle {
@@ -67,7 +74,8 @@ func TestReadPipeDrainsEarlyCloseBeforeReusingReader(t *testing.T) {
 	if _, err := store.Deliver(bytes.NewReader(body)); err != nil {
 		t.Fatal(err)
 	}
-	file, err := store.Open(1)
+	snapshot := store.Snapshot()
+	file, err := store.OpenAt(snapshot, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,24 +88,25 @@ func TestReadPipeDrainsEarlyCloseBeforeReusingReader(t *testing.T) {
 	go func() { _, err := store.Deliver(strings.NewReader("second")); done <- err }()
 	select {
 	case err := <-done:
-		t.Fatalf("write bypassed the leased Git pipe: %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatalf("second close: %v", err)
-	}
-	select {
-	case err := <-done:
 		if err != nil {
 			t.Fatal(err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("closing the Git reader did not release the writer")
+		t.Fatal("body reader blocked SMTP publication")
 	}
-	again, err := store.Open(1)
+	// The retained response is still pinned to the original commit, even after
+	// a writer checkpoint, deletion and process shutdown occur independently.
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete([]uint64{1}); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := store.OpenAt(snapshot, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,9 +198,9 @@ func TestReaderCrashCanRestartWithoutPoisoningWriter(t *testing.T) {
 	if _, err := store.Deliver(strings.NewReader("first")); err != nil {
 		t.Fatal(err)
 	}
-	store.gitMu.Lock()
+	store.readMu.Lock()
 	err = store.reader.cmd.Process.Kill()
-	store.gitMu.Unlock()
+	store.readMu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,5 +213,47 @@ func TestReaderCrashCanRestartWithoutPoisoningWriter(t *testing.T) {
 	message, err := store.Lookup(store.Snapshot(), 2)
 	if err != nil || message.ID != 2 {
 		t.Fatalf("reader restart: %+v, %v", message, err)
+	}
+}
+
+func TestWaitingDeletionDoesNotBlockReceipt(t *testing.T) {
+	t.Parallel()
+	store, err := testNew(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver(strings.NewReader("old")); err != nil {
+		t.Fatal(err)
+	}
+	file, err := store.Open(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	deletion := make(chan error, 1)
+	go func() { deletion <- store.Delete([]uint64{1}) }()
+	receipt := make(chan error, 1)
+	go func() { _, err := store.Deliver(strings.NewReader("new")); receipt <- err }()
+	select {
+	case err := <-receipt:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("pending deletion held the state lock behind a slow reader")
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-deletion:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("deletion did not resume")
+	}
+	if snapshot := store.Snapshot(); snapshot.Count() != 1 || snapshot.LastID != 2 {
+		t.Fatalf("concurrent receipt was overwritten: %+v", snapshot)
 	}
 }
