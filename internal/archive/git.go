@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,6 +84,9 @@ func (s *Store) initializeGit() error {
 		return err
 	}
 	if _, err := os.Lstat(filepath.Join(s.root, "HEAD")); errors.Is(err, os.ErrNotExist) {
+		if err := s.requireUninitializedArchive(); err != nil {
+			return err
+		}
 		if _, err := s.git(nil, "init", "--bare", "--template=", "--initial-branch=main"); err != nil {
 			return err
 		}
@@ -106,6 +110,9 @@ func (s *Store) initializeGit() error {
 	head, err := s.head()
 	if err != nil {
 		// A missing HEAD is legitimate only for a new, unborn branch.
+		if err := s.requireUninitializedArchive(); err != nil {
+			return err
+		}
 		ref, refErr := s.git(nil, "symbolic-ref", "HEAD")
 		if refErr != nil {
 			return err
@@ -184,5 +191,37 @@ func (s *Store) initializeGit() error {
 	// Committed state is authoritative. Rebuilding the directory-count index is
 	// O(directories); mail objects are parsed and checked on demand, not scanned
 	// at every restart. picomx is the only supported writer of this repository.
+	return nil
+}
+
+// Only the missing-HEAD recovery path needs this check. Normal startup trusts
+// committed state and does not walk the object database or enumerate mail.
+func (s *Store) requireUninitializedArchive() error {
+	found := errors.New("archive has existing Git data; restore HEAD instead of importing legacy mail")
+	for _, name := range []string{"objects", "refs", "logs"} {
+		root := filepath.Join(s.root, name)
+		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if errors.Is(err, os.ErrNotExist) && path == root {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if !entry.IsDir() {
+				return found
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	if info, err := os.Stat(filepath.Join(s.root, "packed-refs")); err == nil {
+		if info.Size() != 0 {
+			return found
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	return nil
 }

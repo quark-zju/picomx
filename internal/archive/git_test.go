@@ -296,3 +296,47 @@ func TestBareRejectsExistingWorkingRepository(t *testing.T) {
 		t.Fatal("modified a working repository")
 	}
 }
+
+func TestLostHEADDoesNotReimportLegacyMailOrReuseIDs(t *testing.T) {
+	t.Parallel()
+	for _, missing := range []string{"HEAD", "branch"} {
+		t.Run(missing, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(root, "1"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "1", "001.eml"), []byte("original"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeMailboxState(root, mailboxState{Version: mailboxStateVersion, LastID: 1, TotalOctets: 8}); err != nil {
+				t.Fatal(err)
+			}
+			store, err := testNew(t, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Delete([]uint64{1}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Deliver(strings.NewReader("second")); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if missing == "HEAD" {
+				if err := os.Remove(filepath.Join(root, "HEAD")); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := store.git(nil, "update-ref", "-d", "refs/heads/main"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := testNew(t, root); err == nil || !strings.Contains(err.Error(), "restore HEAD") {
+				t.Fatalf("reinitialized existing archive: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(root, "HEAD")); missing == "HEAD" && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("recreated HEAD before recovery")
+			}
+		})
+	}
+}
