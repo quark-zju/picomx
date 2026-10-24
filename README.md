@@ -1,3 +1,6 @@
+> [!NOTE]
+> 项目移动到 [selfhost/picomx](https://github.com/quark-zju/selfhost/tree/190853bcd6f67edb71d72904fb9efaeccc232d90/picomx)
+
 # picomx
 
 面向个人域名的轻量 self-host 邮件服务（早期原型）。
